@@ -1,0 +1,18 @@
+# Directories
+.memory/
+node_modules/
+.env
+
+# Files
+.env
+*.log
+.DS_Store
+*.md
+
+# MD Files
+AGENTS.md
+CLAUDE.md
+IDEAS.md
+PLAN.md
+README.md
+SPEC.md
