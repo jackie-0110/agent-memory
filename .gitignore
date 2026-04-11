@@ -1,18 +1,13 @@
 # Directories
 .memory/
+.memory-test/
 node_modules/
+.yarn/
 .env
 
 # Files
 .env
 *.log
 .DS_Store
-*.md
-
-# MD Files
-AGENTS.md
-CLAUDE.md
-IDEAS.md
-PLAN.md
-README.md
-SPEC.md
+.pnp.cjs
+.pnp.loader.mjs

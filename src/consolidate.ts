@@ -1,4 +1,4 @@
-import type Database from 'better-sqlite3';
+import Database from 'better-sqlite3';
 
 import type { ConsolidationAction, MainEntry, WorkingNote } from './types.ts';
 
@@ -7,7 +7,11 @@ export interface ConsolidationContext {
   relatedEntries: MainEntry[];
 }
 
-export function gatherContext(_db: Database, _memoryDir: string, _sessionId: string): ConsolidationContext {
+export function gatherContext(
+  _db: Database.Database,
+  _memoryDir: string,
+  _sessionId: string,
+): ConsolidationContext {
   throw new Error('Not implemented yet.');
 }
 
@@ -16,7 +20,7 @@ export function parseActions(_responseText: string): ConsolidationAction[] {
 }
 
 export function applyActions(
-  _db: Database,
+  _db: Database.Database,
   _memoryDir: string,
   _sessionId: string,
   _actions: ConsolidationAction[],
@@ -24,6 +28,6 @@ export function applyActions(
   throw new Error('Not implemented yet.');
 }
 
-export function consolidateSession(_db: Database, _memoryDir: string, _sessionId: string): void {
+export function consolidateSession(_db: Database.Database, _memoryDir: string, _sessionId: string): void {
   throw new Error('Not implemented yet.');
 }
