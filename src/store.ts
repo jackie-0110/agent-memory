@@ -4,7 +4,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renam
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import type { MainEntry, SearchResult, Session, WorkingNote } from './types.ts';
+import type { Correction, MainEntry, SearchResult, Session, WorkingNote } from './types.ts';
 
 const MAIN_DIRS = {
   decision: 'decisions',
@@ -591,6 +591,24 @@ export function getMainEntryFilePath(db: Database.Database, id: number): string 
   }
 
   return row.file_path;
+}
+
+export function readCorrections(memoryDir: string): Correction[] {
+  const filePath = join(memoryDir, 'corrections.jsonl');
+  if (!existsSync(filePath)) return [];
+  const raw = readFileSync(filePath, 'utf8').trim();
+  if (!raw) return [];
+  return raw.split('\n').filter(Boolean).map((line: string) => JSON.parse(line) as Correction);
+}
+
+export function countMainEntries(db: Database.Database): { total: number; active: number } {
+  return db
+    .prepare(
+      `SELECT COUNT(*) as total,
+       COUNT(CASE WHEN superseded_by IS NULL THEN 1 END) as active
+       FROM memory_main`,
+    )
+    .get() as { total: number; active: number };
 }
 
 export function appendCorrection(

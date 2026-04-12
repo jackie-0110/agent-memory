@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 
 import { consolidateSession } from '../src/consolidate.ts';
 import type { ConsolidationAction } from '../src/types.ts';
-import { createSession, endSession, initDb, readMainEntry, readWorkingNotes, searchMain } from '../src/store.ts';
+import { countMainEntries, createSession, endSession, initDb, readMainEntry, readWorkingNotes, searchMain } from '../src/store.ts';
 import type { WorkingNote } from '../src/types.ts';
 
 const memoryDir = resolve(process.cwd(), '.memory');
@@ -125,6 +125,21 @@ const ACTION_ICON: Record<ConsolidationAction['action'], string> = {
   DISCARD:   '✗ DISCARD  ',
 };
 
+function summarizeCounts(actions: ConsolidationAction[]): Record<string, number> {
+  const counts: Record<string, number> = { PROMOTE: 0, MERGE: 0, SUPERSEDE: 0, DISCARD: 0 };
+  for (const a of actions) counts[a.action] = (counts[a.action] ?? 0) + 1;
+  return counts;
+}
+
+function printActionSummary(counts: Record<string, number>): void {
+  indent(
+    Object.entries(counts)
+      .filter(([, n]) => n > 0)
+      .map(([k, n]) => `${k} ×${n}`)
+      .join('   '),
+  );
+}
+
 async function main(): Promise<void> {
   requireApiKey();
 
@@ -132,76 +147,111 @@ async function main(): Promise<void> {
 
   header('replicas-memory  —  parallel agent demo');
 
-  // ── Step 1: Setup ───────────────────────────────────────────
-  step(1, 5, 'Setup');
+  // ── Step 1: Setup ────────────────────────────────────────────
+  step(1, 6, 'Setup');
   runCli(['init', '--memory-dir', memoryDir]);
   const db = initDb(memoryDir);
-  const session = createSession(db, 'parallel-demo');
-  indent(`Memory initialized at  .memory/`);
-  indent(`Session:  ${session.id}`);
+  indent('Memory initialized at  .memory/');
 
-  // ── Step 2: Agents ──────────────────────────────────────────
-  step(2, 5, 'Three agents working in parallel');
+  // ── Step 2: Session 1 agents ─────────────────────────────────
+  step(2, 6, 'Session 1 — three agents exploring auth and debugging');
   indent('Each agent writes to its own JSONL file — no locks, no coordination.');
   console.log('');
 
-  const loaderRuns = await Promise.all(
+  const session1 = createSession(db, 'auth-debugging-session-1');
+  indent(`Session:  ${session1.id}`);
+  console.log('');
+
+  const s1Loaders = await Promise.all(
     agentIds.flatMap((agentId) => [
-      runLoader(agentId, 'demo/scenarios/auth-session.jsonl', session.id),
-      runLoader(agentId, 'demo/scenarios/debugging-session.jsonl', session.id),
+      runLoader(agentId, 'demo/scenarios/auth-session.jsonl', session1.id),
+      runLoader(agentId, 'demo/scenarios/debugging-session.jsonl', session1.id),
     ]),
   );
 
-  for (const { agentId, scenario, count } of loaderRuns) {
+  for (const { agentId, scenario, count } of s1Loaders) {
     indent(`${agentId.padEnd(10)}  ✓  ${String(count).padStart(2)} notes  (${scenario})`);
   }
 
-  const workingNotes = readWorkingNotes(memoryDir, session.id);
+  const s1Notes = readWorkingNotes(memoryDir, session1.id);
   console.log('');
-  indent(`${workingNotes.length} notes across ${agentIds.length} isolated files.  Sample:`);
+  indent(`${s1Notes.length} working notes across ${agentIds.length} isolated files.  Sample:`);
   console.log('');
-  for (const note of workingNotes.slice(0, 4)) {
+  for (const note of s1Notes.slice(0, 4)) {
     indent(`${note.agent_id}  [${note.type.padEnd(11)}]  ${note.content.slice(0, 60)}`, 4);
   }
 
-  // ── Step 3: Consolidation ───────────────────────────────────
-  step(3, 5, 'Consolidation pass');
-  indent(`One LLM call reviews all ${workingNotes.length} notes — decides what belongs in long-term memory.`);
+  // ── Step 3: Session 1 consolidation ──────────────────────────
+  step(3, 6, 'Session 1 — consolidation  (no prior memory, all findings are new)');
+  indent(`One LLM call reviews all ${s1Notes.length} notes — decides what belongs in long-term memory.`);
   console.log('');
 
-  endSession(db, session.id);
-  const result = await consolidateSession(db, memoryDir, session.id);
+  endSession(db, session1.id);
+  const result1 = await consolidateSession(db, memoryDir, session1.id);
+  const counts1 = summarizeCounts(result1.actions);
 
-  // action type counts
-  const counts: Record<string, number> = { PROMOTE: 0, MERGE: 0, SUPERSEDE: 0, DISCARD: 0 };
-  for (const a of result.actions) counts[a.action] = (counts[a.action] ?? 0) + 1;
-  indent(
-    Object.entries(counts)
-      .filter(([, n]) => n > 0)
-      .map(([k, n]) => `${k} ×${n}`)
-      .join('   '),
-  );
+  printActionSummary(counts1);
   console.log('');
-
-  // show up to 6 example actions
-  for (const action of result.actions.slice(0, 6)) {
-    indent(`${ACTION_ICON[action.action]}  ${describeAction(action, result.workingNotes)}`, 4);
+  for (const action of result1.actions.slice(0, 5)) {
+    indent(`${ACTION_ICON[action.action]}  ${describeAction(action, result1.workingNotes)}`, 4);
   }
 
+  const afterS1 = countMainEntries(db);
   console.log('');
-  indent(`${result.actionsApplied} actions applied.  ${result.archivedFiles} agent files archived to working/archive/.`);
+  indent(`${afterS1.active} entries written to main memory.`);
+  indent(`${result1.archivedFiles} agent files archived to working/archive/.`);
 
-  // ── Step 4: Main memory ─────────────────────────────────────
-  step(4, 5, 'Main memory  (what agents will find next session)');
+  // ── Step 4: Session 2 agents ─────────────────────────────────
+  step(4, 6, 'Session 2 — follow-up agents with overlapping knowledge');
+  indent('Same agents, next session. Some findings confirm, one corrects a prior assumption.');
+  console.log('');
+
+  const session2 = createSession(db, 'auth-debugging-session-2');
+  indent(`Session:  ${session2.id}`);
+  console.log('');
+
+  const s2Loaders = await Promise.all(
+    agentIds.flatMap((agentId) => [
+      runLoader(agentId, 'demo/scenarios/auth-followup.jsonl', session2.id),
+      runLoader(agentId, 'demo/scenarios/debugging-followup.jsonl', session2.id),
+    ]),
+  );
+
+  for (const { agentId, scenario, count } of s2Loaders) {
+    indent(`${agentId.padEnd(10)}  ✓  ${String(count).padStart(2)} notes  (${scenario})`);
+  }
+
+  const s2Notes = readWorkingNotes(memoryDir, session2.id);
+  console.log('');
+  indent(`${s2Notes.length} working notes.  The LLM will run against ${afterS1.active} existing entries.`);
+
+  // ── Step 5: Session 2 consolidation ──────────────────────────
+  step(5, 6, 'Session 2 — consolidation  (MERGE and SUPERSEDE now fire)');
+  indent('Memory evolves — overlapping knowledge merges, corrections supersede old entries.');
+  console.log('');
+
+  endSession(db, session2.id);
+  const result2 = await consolidateSession(db, memoryDir, session2.id);
+  const counts2 = summarizeCounts(result2.actions);
+
+  printActionSummary(counts2);
+  console.log('');
+  for (const action of result2.actions.slice(0, 6)) {
+    indent(`${ACTION_ICON[action.action]}  ${describeAction(action, result2.workingNotes)}`, 4);
+  }
+
+  const afterS2 = countMainEntries(db);
+  const superseded = afterS2.total - afterS2.active;
+  console.log('');
+  indent(`${afterS2.active} active entries  (${superseded} superseded, ${result2.actionsApplied} changes applied).`);
+
+  // Main memory breakdown
   const mainFiles = listMainFiles();
-
   const byDir: Record<string, number> = {};
   for (const f of mainFiles) {
     const dir = f.split('/').at(-2) ?? 'other';
     byDir[dir] = (byDir[dir] ?? 0) + 1;
   }
-
-  indent(`${mainFiles.length} entries written:`);
   console.log('');
   for (const [dir, count] of Object.entries(byDir)) {
     indent(`${dir.padEnd(14)}  ${count} ${count === 1 ? 'entry' : 'entries'}`, 4);
@@ -219,8 +269,8 @@ async function main(): Promise<void> {
     );
   }
 
-  // ── Step 5: Search ──────────────────────────────────────────
-  step(5, 5, 'Search  (a new agent starts next session and queries)');
+  // ── Step 6: Search ───────────────────────────────────────────
+  step(6, 6, 'Search  (a new agent queries knowledge from both sessions)');
   console.log('');
 
   const searchDb = initDb(memoryDir);
@@ -236,12 +286,13 @@ async function main(): Promise<void> {
 
   db.close();
 
-  // ── Summary ─────────────────────────────────────────────────
+  // ── Summary ──────────────────────────────────────────────────
   console.log(`\n${DIVIDER}`);
-  indent(`DEMO COMPLETE`);
+  indent('DEMO COMPLETE');
   console.log(THIN);
-  indent(`${workingNotes.length} working notes  →  ${result.actionsApplied} main memory entries`);
-  indent(`Any future agent can find this knowledge with replicas-memory search.`);
+  indent(`Session 1:  ${s1Notes.length} notes  →  ${result1.actionsApplied} entries created  (PROMOTE ×${counts1.PROMOTE ?? 0}, DISCARD ×${counts1.DISCARD ?? 0})`);
+  indent(`Session 2:  ${s2Notes.length} notes  →  memory evolved  (MERGE ×${counts2.MERGE ?? 0}, SUPERSEDE ×${counts2.SUPERSEDE ?? 0}, PROMOTE ×${counts2.PROMOTE ?? 0})`);
+  indent(`Final:      ${afterS2.active} active entries across both sessions`);
   console.log(DIVIDER);
   console.log('');
 }

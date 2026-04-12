@@ -7,15 +7,17 @@ import {
   getSession,
   listMainEntriesByTags,
   markSessionConsolidated,
+  readCorrections,
   readWorkingNotes,
   updateMainEntry,
   writeMainEntry,
 } from './store.ts';
-import type { ConsolidationAction, MainEntry, WorkingNote } from './types.ts';
+import type { ConsolidationAction, Correction, MainEntry, WorkingNote } from './types.ts';
 
 export interface ConsolidationContext {
   workingNotes: WorkingNote[];
   relatedEntries: MainEntry[];
+  corrections: Correction[];
 }
 
 export interface ConsolidationResult {
@@ -39,8 +41,9 @@ export function gatherContext(
   const workingNotes = readWorkingNotes(memoryDir, sessionId);
   const allTags = [...new Set(workingNotes.flatMap((note) => note.tags))];
   const relatedEntries = listMainEntriesByTags(db, allTags, 30);
+  const corrections = readCorrections(memoryDir);
 
-  return { workingNotes, relatedEntries };
+  return { workingNotes, relatedEntries, corrections };
 }
 
 function stripJsonFences(responseText: string): string {
@@ -330,7 +333,7 @@ export async function consolidateSession(
     throw new Error(`No working notes found for session ${sessionId}.`);
   }
 
-  const prompt = buildConsolidationPrompt(context.workingNotes, context.relatedEntries);
+  const prompt = buildConsolidationPrompt(context.workingNotes, context.relatedEntries, context.corrections);
   const responseText = await callLlm(prompt);
   const actions = parseActions(responseText);
   const actionsApplied = applyActions(db, memoryDir, sessionId, actions);
