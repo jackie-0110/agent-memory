@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
 
+import { getSession } from './store.ts';
 import type { Session } from './types.ts';
 
 export interface SessionContext {
@@ -8,9 +9,20 @@ export interface SessionContext {
 }
 
 export function resolveSessionContext(
-  _db: Database.Database,
-  _memoryDir: string,
-  _sessionId?: string,
+  db: Database.Database,
+  memoryDir: string,
+  sessionId?: string,
 ): SessionContext {
-  throw new Error('Not implemented yet.');
+  const resolvedSessionId = sessionId ?? process.env.REPLICAS_MEMORY_SESSION_ID;
+
+  if (!resolvedSessionId) {
+    throw new Error(
+      'No session ID provided. Pass one explicitly or set REPLICAS_MEMORY_SESSION_ID in the environment.',
+    );
+  }
+
+  return {
+    session: getSession(db, resolvedSessionId),
+    memoryDir,
+  };
 }

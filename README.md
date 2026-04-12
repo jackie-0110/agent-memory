@@ -2,14 +2,9 @@
 
 > Persistent memory for parallel coding agents working on a single fast-moving codebase.
 
-<!--
-README skeleton — fill this in during Hour 7. Sections marked TODO are to be written then.
-The structure is fixed; the content is yours to write.
--->
-
 ## What this is
 
-TODO: One paragraph. Explain the project to someone who has never heard of it. Lead with the problem ("coding agents forget what they learned across sessions"), then the solution ("a two-tier memory system that captures observations cheaply and consolidates them between sessions"), then the scope ("built for 2-10 parallel agents on a single project — designed for integration with Replicas, runs locally for this takehome").
+Coding agents forget what they learned. Between sessions, across agents, when context windows fill — observations disappear and work gets redone. `replicas-memory` is a two-tier memory system that captures everything agents observe during a session and uses an LLM pass to distill it into persistent, searchable knowledge. Working notes are cheap to write and lossy by design; main memory is curated, shared across agents, and only written by the consolidation pass. Built for 2–10 parallel agents on a single project, designed for integration with Replicas, runs locally via SQLite for this takehome.
 
 ## Quickstart
 
@@ -25,15 +20,12 @@ The demo spawns three agents working in parallel, has them write observations ab
 
 ## Why this exists
 
-TODO: 5-6 bullets covering the foundational insights:
-- Context retrieval quality dominates model capability for coding agents (SWE-agent showed +10.7pp on SWE-bench from interface improvements alone)
-- More memory in context actively hurts performance past ~150-200 instructions (SWE-ContextBench, Feb 2026)
-- Store decisions and rationale, not descriptions of code (the "what" is rediscoverable with `rg`)
-- The moment of writing is the worst moment to decide what's worth keeping (motivates the working/main split)
-- Reflective summaries beat raw trajectory replay (Reflexion, NeurIPS 2023)
-- Per-writer files solve concurrency for free (Claude Code's JSONL corruption bugs prove the alternative is unsafe)
-
-Each bullet should be one sentence.
+- Context retrieval quality dominates model capability for coding agents — SWE-agent showed +10.7pp on SWE-bench from interface improvements alone, without touching the model.
+- More memory in context actively hurts performance past ~150–200 instructions — agents need a curated subset, not the full history (SWE-ContextBench, Feb 2026).
+- Store decisions and rationale, not descriptions of code — the "what" is always rediscoverable with `rg`; the "why a choice was made" is not.
+- The moment of writing is the worst time to decide what's worth keeping — the working/main split separates capture (cheap, during work) from curation (careful, after work).
+- Reflective summaries beat raw trajectory replay — the consolidation pass compresses session lessons the same way Reflexion (NeurIPS 2023) showed reflective agents outperform raw trajectory agents.
+- Per-writer files solve concurrency for free — Claude Code's JSONL corruption bugs prove that shared append-only files across processes are unsafe; per-agent files eliminate the problem entirely.
 
 ## Architecture
 
@@ -51,19 +43,21 @@ Each bullet should be one sentence.
 └── README.md                         # The agent-facing convention doc
 ```
 
-TODO: Two paragraphs explaining the two-tier model. First paragraph: working memory is cheap, lossy, per-agent — agents write aggressively during sessions because the bar is low. Second paragraph: main memory is curated, persistent, shared — only written by the consolidation pass, never by agents directly. Explain why the split solves concurrency, curation quality, drift, and debuggability simultaneously.
+Working memory is the cheap tier. During a session, each agent writes observations, decisions, and debugging notes to its own JSONL file with no coordination overhead. The bar is deliberately low — agents write aggressively because discarding noise is the consolidation pass's job, not the agent's. No two processes ever write the same file, so concurrency is free.
+
+Main memory is the curated tier. It's a collection of markdown files — one per persistent insight — with YAML frontmatter tracking type, confidence, sources, and supersession history. A SQLite FTS5 index provides millisecond keyword search across all entries. Agents read from main memory but never write to it directly. Only the consolidation pass can promote a working note into main memory, ensuring quality stays high as the project grows.
 
 ## How it works
 
-TODO: Walk through the lifecycle:
+1. **Session start.** `replicas-memory session start <name>` registers a session in SQLite and returns a session ID. Each agent on the team gets its own working memory file derived from session ID + agent ID — no coordination needed.
 
-1. **Session start.** `replicas-memory session start <name>` creates a session ID. Each agent gets its own working memory file derived from session ID + agent ID.
-2. **During the session.** Agents call `replicas-memory note "..."` to write observations. Each agent writes only to its own file. No coordination needed.
-3. **Session end.** `replicas-memory session end <id>` triggers the consolidation pass.
-4. **Consolidation.** A single LLM call (Claude Haiku) reviews all working notes, fetches relevant existing main memory by tag overlap, and decides what to promote, merge, supersede, or discard.
-5. **Next session.** Future agents call `replicas-memory search "..."` to find consolidated knowledge from prior sessions.
+2. **During the session.** Agents call `replicas-memory note "..."` to write observations, tagging them with relevant topics. Each agent writes only to its own JSONL file. Because the bar is low, agents write liberally — noise is expected and handled downstream.
 
-Each step in 2-3 sentences. Don't over-explain.
+3. **Session end.** `replicas-memory session end <id>` triggers consolidation automatically. All working notes from the session are gathered and sent to Claude Haiku for review.
+
+4. **Consolidation.** A single LLM call reviews every working note against existing main memory entries that share overlapping tags. It decides for each note: PROMOTE (new insight → new main entry), MERGE (corroborates existing → update entry), SUPERSEDE (contradicts existing → replace entry), or DISCARD (noise → drop). Working files are archived, not deleted.
+
+5. **Next session.** Future agents call `replicas-memory search "..."` to retrieve consolidated knowledge. Results are ranked by FTS5 relevance. An agent beginning work on authentication will immediately find that "JWT refresh tokens must be rotated on every use" was a hard-won lesson from three sessions ago.
 
 ## CLI reference
 
@@ -78,9 +72,9 @@ replicas-memory correct "..." "..." "..."         # log a user correction
 replicas-memory consolidate <id>                  # manually trigger consolidation
 ```
 
-## Design decisions
+Session ID and agent ID can be passed via `REPLICAS_MEMORY_SESSION_ID` / `REPLICAS_MEMORY_AGENT_ID` environment variables so agents never have to manage IDs manually. Every command supports `--json` for machine-readable output and `--help` for usage details.
 
-TODO: What we built, what we deliberately skipped, and why. Three subsections:
+## Design decisions
 
 ### What we built
 - Two-tier memory (working + main)
@@ -99,39 +93,30 @@ TODO: What we built, what we deliberately skipped, and why. Three subsections:
 - Web UI (cat and rg are the UI)
 
 ### Why
-TODO: Reference the foundational insights. Connect each "skipped" item to a specific insight that justifies skipping it.
+
+Every skipped item maps to a deliberate principle. Vector embeddings were skipped because FTS5 keyword search is sufficient at this scale and avoids the embedding infrastructure tax — if recall gaps appear in production, hybrid retrieval is parked in IDEAS.md. Knowledge graphs were skipped because the `supersedes` field in main memory frontmatter handles the temporal versioning problem at a fraction of the complexity. MCP server integration was skipped because the filesystem already is the API: agents can `cat` any `.memory/main/` file and `rg` across all of them without any protocol overhead. Tests were skipped not from negligence but because the demo provides end-to-end coverage for a one-day build — the production version would add integration tests as the first post-takehome step. A web UI was skipped because `cat` and `rg` are the correct UI for a system whose consumers are agents and developers.
 
 ## Production deployment notes
 
-TODO: This is the most important section in the README. The takehome runs locally, but the founder needs to see that I understood how it would work in their actual environment.
+This takehome runs locally because I don't have access to Replicas — but every architectural decision was made with the multi-VM production case in mind. Here's the integration path.
 
-Cover:
+**The Replicas integration story.** When `replicas connect <branch>` provisions a VM, it would also: generate a session ID, inject `REPLICAS_MEMORY_SESSION_ID` and `REPLICAS_MEMORY_AGENT_ID` as environment variables so agents never manage IDs manually, write `.memory/README.md` into the project directory inside the VM so agents understand the memory convention on first boot, and optionally pre-warm context with `replicas-memory search` results based on the branch name. When the VM tears down via `replicas disconnect`, the cleanup hook calls `replicas-memory consolidate <session-id>`. The agent sees a working memory system with zero configuration overhead.
 
-1. **Why local-first for the takehome.** I didn't have access to Replicas, so the takehome runs on a single machine via SQLite. The architecture is designed for the multi-VM case from the ground up — every architectural decision considers what changes when memory becomes shared across VMs.
+**Storage substrate migration.** SQLite becomes Postgres in Supabase (which Replicas already operates). The schema is nearly identical — `tsvector` replaces FTS5, `gin` indexes replace FTS5 triggers, and row-level security can gate memory to the project. Each VM's agent talks to the shared Supabase instance over the network, so memory is automatically cross-VM with no additional coordination layer. Postgres MVCC handles concurrent writes from multiple VMs trivially. The local `.memory/` directory remains as a debugging mirror inside each VM; Supabase is the source of truth.
 
-2. **The Replicas integration story.** When `replicas connect <branch>` provisions a VM, it would also: generate a session ID, write `.memory/README.md` into the project directory inside the VM, set `REPLICAS_MEMORY_SESSION_ID` and `REPLICAS_MEMORY_AGENT_ID` environment variables so the agent's tool calls don't need to pass them explicitly, and optionally pre-warm Cursor's context with `replicas-memory search` results based on the branch name.
+**Consolidation triggers.** In production, consolidation runs in three modes: (1) automatically when a VM is torn down via the `replicas disconnect` cleanup hook, (2) after a configurable idle timeout for long-running sessions, and (3) manually via `replicas-memory consolidate <id>` for debugging. Consolidation is single-threaded per project to avoid LLM race conditions — a simple Supabase advisory lock is sufficient.
 
-3. **Storage substrate migration.** SQLite becomes Postgres in Supabase (which Replicas already operates). The schema is nearly identical — `tsvector` replaces FTS5, `gin` indexes replace FTS5 triggers, everything else is the same. Each VM's agent talks to the shared Supabase instance over the network, so memory is automatically cross-VM with no additional coordination layer. Postgres MVCC handles concurrent writes from multiple VMs trivially.
+**The TypeScript codebase drops in cleanly.** Because this is already TypeScript with ESM, it can be added as a workspace package in the existing Replicas monorepo (the `cli/` directory). The CLI command becomes a sub-command of `replicas` — `replicas memory note "..."` instead of `replicas-memory note "..."`. The storage layer swap (SQLite → Supabase Postgres) is a single-file change to `src/store.ts`; all other modules are substrate-agnostic.
 
-4. **The local `.memory/` directory becomes optional.** In production, it exists only as a debugging mirror inside each VM. Supabase is the source of truth. Users who want to inspect what an agent remembered can either query Supabase directly or `cat` the local mirror inside the VM.
-
-5. **Consolidation triggers.** In production, consolidation runs when a VM is torn down (cleanup hook in `replicas disconnect`) or after a configurable idle timeout for long-running sessions. Consolidation is single-threaded per project to avoid race conditions.
-
-6. **The TypeScript codebase drops in cleanly.** Because the takehome is already TypeScript with ESM, it can be added as a workspace package in the existing Replicas monorepo (the `cli/` directory). The CLI command becomes a sub-command of `replicas` (e.g., `replicas memory note "..."` instead of `replicas-memory note "..."`).
-
-7. **What I'd want to confirm with the team before implementing this.** Where in Supabase memory should live (same project, separate schema, separate instance), what the natural session boundary is in the Replicas orchestration model, and whether there's a clean teardown hook for triggering consolidation.
-
-This section should be 5-6 paragraphs. It's the section that proves I thought about the real product, not just the toy version.
+**What I'd want to confirm with the team.** Where memory should live in Supabase (same project, separate schema, or separate instance with RLS by project), what the natural session boundary is in the Replicas orchestration model (VM lifecycle vs. explicit session commands), and whether there's a clean teardown hook for triggering consolidation on VM shutdown.
 
 ## What I'd build next
 
-TODO: 4-5 bullets pointing at things in IDEAS.md. Each should be one sentence explaining the value.
-
-- Production migration to Postgres/Supabase (the integration plan above)
-- Confidence-weighted retrieval ranking (boost search results from convergent observations)
-- A `verify` command that runs against the current codebase to detect stale entries
-- Periodic re-consolidation pass that re-evaluates old entries against recent ones
-- Cursor extension that surfaces relevant memory entries inline as completion hints
+- **Production migration to Postgres/Supabase** — the integration plan above is ready to implement; the storage swap is a single-file change to `src/store.ts`.
+- **Confidence-weighted retrieval ranking** — boost search results from entries with convergent observations (multiple agents independently noted the same thing), surfacing the most reliable knowledge first.
+- **A `verify` command** — runs against the current codebase to detect stale main memory entries, flagging decisions that contradict what's actually in the code.
+- **Periodic re-consolidation** — a background pass that re-evaluates older main memory entries against recent sessions, merging or superseding as the project evolves.
+- **Cursor extension** — surfaces relevant memory entries inline as the agent opens a file, turning accumulated project knowledge into passive ambient context.
 
 ## License
 

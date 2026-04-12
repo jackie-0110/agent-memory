@@ -1,6 +1,6 @@
 # Directories
 .memory/
-.memory-test/
+.memory-*/
 node_modules/
 .yarn/
 .env

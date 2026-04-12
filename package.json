@@ -3,9 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "bin": {
-    "replicas-memory": "./bin/replicas-memory"
-  },
+  "bin": "./bin/replicas-memory",
   "scripts": {
     "cli": "tsx src/cli.ts",
     "demo": "tsx demo/demo.ts"

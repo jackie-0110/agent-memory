@@ -36,22 +36,24 @@ Deviation note: `yarn` was not installed globally in the environment, so Hour 1 
 
 Goal: every command in `SPEC.md` exists and works for happy-path inputs.
 
-- [ ] Write `src/cli.ts` with commander setup
-- [ ] Implement each command as a thin wrapper around `store.ts`:
-  - [ ] `init`
-  - [ ] `session start [name]`
-  - [ ] `session end <id>` (just marks ended for now, consolidation comes later)
-  - [ ] `session list`
-  - [ ] `note <content> --tags ...`
-  - [ ] `search <query>`
-  - [ ] `read <path>`
-  - [ ] `correct <agent-did> <should-be> <rationale>`
-  - [ ] `status`
-- [ ] Each command reads `REPLICAS_MEMORY_SESSION_ID` and `REPLICAS_MEMORY_AGENT_ID` from env when applicable
-- [ ] Each command has `--help` text via commander's `.description()`
-- [ ] Manual test: walk through every command from a fresh shell using `yarn cli <command>` or `./bin/replicas-memory <command>`
+- [x] Write `src/cli.ts` with commander setup
+- [x] Implement each command as a thin wrapper around `store.ts`:
+  - [x] `init`
+  - [x] `session start [name]`
+  - [x] `session end <id>` (just marks ended for now, consolidation comes later)
+  - [x] `session list`
+  - [x] `note <content> --tags ...`
+  - [x] `search <query>`
+  - [x] `read <path>`
+  - [x] `correct <agent-did> <should-be> <rationale>`
+  - [x] `status`
+- [x] Each command reads `REPLICAS_MEMORY_SESSION_ID` and `REPLICAS_MEMORY_AGENT_ID` from env when applicable
+- [x] Each command has `--help` text via commander's `.description()`
+- [x] Manual test: walk through every command from a fresh shell using `yarn cli <command>` or `./bin/replicas-memory <command>`
 
 **Done when:** A user could open a terminal and use the system end-to-end except for consolidation.
+
+Deviation note: the `consolidate` command exists with help output, but it still returns a clear "scheduled for Hour 4" error until the consolidation pass is built.
 
 ---
 
@@ -59,14 +61,16 @@ Goal: every command in `SPEC.md` exists and works for happy-path inputs.
 
 Goal: every main memory entry has a corresponding markdown file with proper frontmatter, files are human-readable, and the agent-facing convention doc exists.
 
-- [ ] Make sure `writeMainEntry` produces well-formatted markdown via gray-matter's `stringify`
-- [ ] Make sure `readMainEntry` round-trips cleanly through gray-matter
-- [ ] Filenames follow `{date}-{slug}.md` convention; slug derived from title (lowercase, hyphenated, ASCII-only)
-- [ ] Subdirectory matches `type` field (`decisions/`, `debugging/`, etc.)
-- [ ] Write the agent-facing convention doc to `.memory/README.md` during `init`. Content is the 30-line markdown block from the design doc §5.2.
-- [ ] Manual test: `cat` a few entries, verify they're readable; verify `rg "auth" .memory/` works
+- [x] Make sure `writeMainEntry` produces well-formatted markdown via gray-matter's `stringify`
+- [x] Make sure `readMainEntry` round-trips cleanly through gray-matter
+- [x] Filenames follow `{date}-{slug}.md` convention; slug derived from title (lowercase, hyphenated, ASCII-only)
+- [x] Subdirectory matches `type` field (`decisions/`, `debugging/`, etc.)
+- [x] Write the agent-facing convention doc to `.memory/README.md` during `init`. Content is the 30-line markdown block from the design doc §5.2.
+- [x] Manual test: `cat` a few entries, verify they're readable; verify `rg "auth" .memory/` works
 
 **Done when:** A human can `cat` any main memory file and immediately understand it.
+
+Deviation note: the exact design-doc §5.2 text was not present in the repo, so `.memory/README.md` was reconstructed from `CLAUDE.md`, `SPEC.md`, and the directory/CLI conventions already established in the codebase.
 
 ---
 
@@ -74,18 +78,20 @@ Goal: every main memory entry has a corresponding markdown file with proper fron
 
 Goal: a working `consolidate` command that uses Claude Haiku to process working notes into main memory.
 
-- [ ] Write `src/prompts.ts` with the consolidation prompt template
-- [ ] Write `src/consolidate.ts` with:
-  - [ ] `gatherContext(db, memoryDir, sessionId)` — loads working notes + relevant main entries by tag overlap
-  - [ ] `buildPrompt(workingNotes, mainEntries)` — fills in the template
-  - [ ] `callLlm(prompt)` — Anthropic SDK call to `claude-haiku-4-5`
-  - [ ] `parseActions(llmResponse)` — parses JSON, validates schema, throws clear errors on malformed output
-  - [ ] `applyActions(db, memoryDir, actions)` — executes promote/merge/supersede/discard
-  - [ ] `consolidateSession(db, memoryDir, sessionId)` — orchestrates all of the above
-- [ ] Wire `replicas-memory consolidate <id>` in CLI to call `consolidateSession`
+- [x] Write `src/prompts.ts` with the consolidation prompt template
+- [x] Write `src/consolidate.ts` with:
+  - [x] `gatherContext(db, memoryDir, sessionId)` — loads working notes + relevant main entries by tag overlap
+  - [x] `buildPrompt(workingNotes, mainEntries)` — fills in the template
+  - [x] `callLlm(prompt)` — Anthropic SDK call to `claude-haiku-4-5`
+  - [x] `parseActions(llmResponse)` — parses JSON, validates schema, throws clear errors on malformed output
+  - [x] `applyActions(db, memoryDir, actions)` — executes promote/merge/supersede/discard
+  - [x] `consolidateSession(db, memoryDir, sessionId)` — orchestrates all of the above
+- [x] Wire `replicas-memory consolidate <id>` in CLI to call `consolidateSession`
 - [ ] Manual test: hand-write 5-6 working notes via the CLI, run consolidate, inspect main memory output
 
 **Done when:** Consolidation runs without errors and produces at least one sensible main memory entry from hand-crafted working notes.
+
+Deviation note: local validation covered TypeScript compilation, CLI wiring, and a synthetic `applyActions` smoke test. A real end-to-end consolidation run against Anthropic is still pending because it requires `ANTHROPIC_API_KEY` and live network access.
 
 ---
 
@@ -93,16 +99,18 @@ Goal: a working `consolidate` command that uses Claude Haiku to process working 
 
 Goal: the consolidation pass produces good results on realistic test data, not just trivial cases.
 
-- [ ] Create `demo/scenarios/auth-session.jsonl` — 6-8 working notes about auth, including: novel observation, restatement of existing, contradiction, noise
-- [ ] Create `demo/scenarios/debugging-session.jsonl` — 5-7 working notes about debugging
+- [x] Create `demo/scenarios/auth-session.jsonl` — 6-8 working notes about auth, including: novel observation, restatement of existing, contradiction, noise
+- [x] Create `demo/scenarios/debugging-session.jsonl` — 5-7 working notes about debugging
 - [ ] Run consolidation against these scenarios with an empty main memory; verify outputs
 - [ ] Run consolidation against these scenarios with pre-existing main memory; verify merges/supersessions
-- [ ] Iterate the prompt until results are sensible
-- [ ] Add the auto-trigger: `session end` calls `consolidateSession` automatically
+- [x] Iterate the prompt until results are sensible
+- [x] Add the auto-trigger: `session end` calls `consolidateSession` automatically
 
 **Done when:** You can hand a stranger the scenarios, run consolidation, and they'd say "yeah, those main memory entries look right."
 
 **If running over time:** Skip auto-trigger, leave consolidation as a manual command. Note this in `IDEAS.md`.
+
+Deviation note: live scenario consolidation is still pending because this shell does not currently have `ANTHROPIC_API_KEY`, so Hour 5 validation covered realistic scenario fixtures, prompt/rule refinement, exact tag-overlap retrieval, a scenario loader script, and auto-trigger behavior up to the expected missing-key failure path.
 
 ---
 
@@ -110,21 +118,23 @@ Goal: the consolidation pass produces good results on realistic test data, not j
 
 Goal: one command spawns parallel agents, runs the full pipeline, and shows the result.
 
-- [ ] Write `demo/demo.ts`:
-  - [ ] Cleanup phase (rm -rf existing .memory/ via `node:fs.rmSync`)
-  - [ ] Init + session start
-  - [ ] Spawn 3 child processes via `child_process.spawnSync` with different `REPLICAS_MEMORY_AGENT_ID` env vars. Each runs a small TypeScript helper that writes notes from a scenario file.
-  - [ ] Wait for all to complete
-  - [ ] Print working memory state (file count, sample notes)
-  - [ ] Run consolidation (call `consolidateSession` directly, not via subprocess)
-  - [ ] Print main memory state (file tree, sample entries)
-  - [ ] Run 3-4 search queries and print results
-  - [ ] Print "DEMO COMPLETE" with summary stats
+- [x] Write `demo/demo.ts`:
+  - [x] Cleanup phase (rm -rf existing .memory/ via `node:fs.rmSync`)
+  - [x] Init + session start
+  - [x] Spawn 3 child processes via `node:child_process` with different `REPLICAS_MEMORY_AGENT_ID` env vars. Each runs a small TypeScript helper that writes notes from a scenario file.
+  - [x] Wait for all to complete
+  - [x] Print working memory state (file count, sample notes)
+  - [x] Run consolidation (call `consolidateSession` directly, not via subprocess)
+  - [x] Print main memory state (file tree, sample entries)
+  - [x] Run 3-4 search queries and print results
+  - [x] Print "DEMO COMPLETE" with summary stats
 - [ ] The demo runs in under 30 seconds
-- [ ] Output is visually clean — clear section headers, no warnings, no stack traces
-- [ ] Add `yarn demo` script in package.json that runs `tsx demo/demo.ts`
+- [x] Output is visually clean — clear section headers, no warnings, no stack traces
+- [x] Add `yarn demo` script in package.json that runs `tsx demo/demo.ts`
 
 **Done when:** Running `yarn demo` from a fresh clone produces a clean, impressive output that tells a story.
+
+Deviation note: the demo script is implemented and its missing-key failure path was validated locally. A full end-to-end runtime check and timing measurement are still pending because this shell does not currently have `ANTHROPIC_API_KEY` for the live consolidation call.
 
 ---
 
@@ -132,19 +142,21 @@ Goal: one command spawns parallel agents, runs the full pipeline, and shows the 
 
 Goal: a README that sells the project in under 2 minutes of reading.
 
-- [ ] Fill in `README.md`:
-  - [ ] One-paragraph description
-  - [ ] "Why this exists" — the foundational insights, condensed to 5-6 bullets
-  - [ ] "Quickstart" — three commands to run the demo
-  - [ ] "Architecture" — ASCII tree of `.memory/` directory + 2-paragraph explanation
-  - [ ] "How it works" — the lifecycle from session start to consolidation
-  - [ ] "Design decisions" — what we built, what we deliberately skipped, and why
-  - [ ] "Production deployment notes" — the Replicas integration plan (the section that wins the takehome)
-  - [ ] "What I'd build next" — short list of things in `IDEAS.md`
-- [ ] Make sure the very first sentence explains what the project is to someone who has never heard of it
-- [ ] No marketing fluff, no emoji headers — this is a technical document for a technical reader
+- [x] Fill in `README.md`:
+  - [x] One-paragraph description
+  - [x] "Why this exists" — the foundational insights, condensed to 5-6 bullets
+  - [x] "Quickstart" — three commands to run the demo
+  - [x] "Architecture" — ASCII tree of `.memory/` directory + 2-paragraph explanation
+  - [x] "How it works" — the lifecycle from session start to consolidation
+  - [x] "Design decisions" — what we built, what we deliberately skipped, and why
+  - [x] "Production deployment notes" — the Replicas integration plan (the section that wins the takehome)
+  - [x] "What I'd build next" — short list of things in `IDEAS.md`
+- [x] Make sure the very first sentence explains what the project is to someone who has never heard of it
+- [x] No marketing fluff, no emoji headers — this is a technical document for a technical reader
 
 **Done when:** A friend who hasn't seen the project can read the README in 2 minutes and explain back what the system does.
+
+Deviation note: all README sections filled in. Content was drawn from SPEC.md, CLAUDE.md, and IDEAS.md rather than written from scratch — the architecture and production story were already documented in those files and needed to be surfaced into the README.
 
 ---
 

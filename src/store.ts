@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import matter from 'gray-matter';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -12,6 +12,50 @@ const MAIN_DIRS = {
   convention: 'conventions',
   architecture: 'architecture',
 } as const;
+
+const AGENT_CONVENTION_DOC = `# replicas-memory
+
+This directory is shared memory for coding agents working on this repository.
+
+## What to write
+
+- Write working notes with \`replicas-memory note "..." --tags ...\` during a session.
+- Record decisions, debugging findings, conventions, and architecture insights.
+- Prefer facts that would help a future agent move faster.
+- Include tags that match the subsystem or concept involved.
+- Set confidence honestly. Use \`low\` for hypotheses and \`high\` for repeated or verified findings.
+
+## What not to write
+
+- Do not copy large chunks of code into memory.
+- Do not restate facts that are trivial to rediscover with \`rg\`.
+- Do not treat scratch thoughts as durable truth.
+- Do not write directly into \`.memory/main/\`.
+
+## Memory model
+
+- \`.memory/working/\` is cheap, per-session, per-agent, and append-only.
+- \`.memory/main/\` is curated shared memory written by consolidation only.
+- Main memory entries are markdown files mirrored from SQLite for human inspection.
+- Superseded entries stay in the database for history, but default search hides them.
+
+## Retrieval flow
+
+- Use \`replicas-memory search "query"\` to find relevant consolidated memory.
+- Use \`replicas-memory read <path-or-id>\` to inspect the full entry before acting on it.
+- If memory conflicts with the codebase, trust the codebase and log a correction.
+
+## Corrections
+
+- Use \`replicas-memory correct "agent did X" "should be Y" "why"\` when a memory-driven action was wrong.
+- Corrections are append-only and help future consolidation improve.
+
+## Concurrency
+
+- Each agent writes only to its own working-memory JSONL file.
+- Do not edit another agent's working-memory file.
+- Consolidation happens after the session and is the only path into shared durable memory.
+`;
 
 function ensureMemoryLayout(memoryDir: string): void {
   mkdirSync(memoryDir, { recursive: true });
@@ -27,6 +71,8 @@ function ensureMemoryLayout(memoryDir: string): void {
   if (!existsSync(correctionsPath)) {
     writeFileSync(correctionsPath, '', 'utf8');
   }
+
+  writeFileSync(join(memoryDir, 'README.md'), AGENT_CONVENTION_DOC, 'utf8');
 }
 
 function slugify(value: string): string {
@@ -43,7 +89,6 @@ function slugify(value: string): string {
 function buildMarkdown(entry: MainEntry): string {
   const frontmatter = {
     type: entry.type,
-    title: entry.title,
     created: entry.created_at,
     last_verified: entry.last_verified,
     confidence: entry.confidence,
@@ -52,7 +97,7 @@ function buildMarkdown(entry: MainEntry): string {
     superseded_by: entry.superseded_by ?? null,
   };
 
-  const content = `# ${entry.title}\n\n${entry.content.trim()}\n`;
+  const content = `# ${entry.title.trim()}\n\n${entry.content.trim()}\n`;
   return matter.stringify(content, frontmatter);
 }
 
@@ -108,6 +153,65 @@ function buildEntryFilePath(memoryDir: string, entry: MainEntry): string {
   return filePath;
 }
 
+function parseSources(rawSources: string | null): MainEntry['sources'] {
+  if (!rawSources) {
+    return [];
+  }
+
+  const parsed = JSON.parse(rawSources) as unknown;
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+
+  return parsed.flatMap((item) => {
+    if (!item || typeof item !== 'object') {
+      return [];
+    }
+
+    const session = 'session' in item ? item.session : undefined;
+    const agents = 'agents' in item ? item.agents : undefined;
+
+    if (typeof session !== 'string' || !Array.isArray(agents)) {
+      return [];
+    }
+
+    return [
+      {
+        session,
+        agents: agents.map((agent) => String(agent)),
+      },
+    ];
+  });
+}
+
+function normalizeMainEntryRow(row: {
+  id: number;
+  type: string;
+  title: string;
+  content: string;
+  tags: string | null;
+  confidence: string;
+  created_at: string;
+  last_verified: string;
+  superseded_by: number | null;
+  sources: string | null;
+  file_path: string;
+}): MainEntry {
+  return {
+    id: row.id,
+    type: row.type as MainEntry['type'],
+    title: row.title,
+    content: row.content,
+    tags: row.tags ? row.tags.split(',').map((tag) => tag.trim()).filter(Boolean) : [],
+    confidence: row.confidence as MainEntry['confidence'],
+    created_at: row.created_at,
+    last_verified: row.last_verified,
+    superseded_by: row.superseded_by,
+    sources: parseSources(row.sources),
+    file_path: row.file_path,
+  };
+}
+
 function readSessionRow(db: Database.Database, sessionId: string): Session {
   const row = db
     .prepare(
@@ -129,6 +233,22 @@ function readSessionRow(db: Database.Database, sessionId: string): Session {
     throw new Error(`Session ${sessionId} not found.`);
   }
 
+  return {
+    id: row.id,
+    name: row.name ?? undefined,
+    started_at: row.started_at,
+    ended_at: row.ended_at ?? undefined,
+    consolidated_at: row.consolidated_at ?? undefined,
+  };
+}
+
+function normalizeSessionRow(row: {
+  id: string;
+  name: string | null;
+  started_at: string;
+  ended_at: string | null;
+  consolidated_at: string | null;
+}): Session {
   return {
     id: row.id,
     name: row.name ?? undefined,
@@ -198,7 +318,7 @@ export function initDb(memoryDir: string): Database.Database {
 
 export function writeMainEntry(db: Database.Database, entry: MainEntry): number {
   const memoryDir = getMemoryDirFromDb(db);
-  const filePath = buildEntryFilePath(memoryDir, entry);
+  const filePath = entry.file_path || buildEntryFilePath(memoryDir, entry);
   const serializedSources = JSON.stringify(entry.sources);
 
   const result = db
@@ -247,6 +367,91 @@ export function readMainEntry(filePath: string): MainEntry {
   };
 }
 
+export function getMainEntry(db: Database.Database, id: number): MainEntry {
+  const row = db
+    .prepare(
+      `SELECT id, type, title, content, tags, confidence, created_at, last_verified, superseded_by, sources, file_path
+       FROM memory_main
+       WHERE id = ?`,
+    )
+    .get(id) as
+    | {
+        id: number;
+        type: string;
+        title: string;
+        content: string;
+        tags: string | null;
+        confidence: string;
+        created_at: string;
+        last_verified: string;
+        superseded_by: number | null;
+        sources: string | null;
+        file_path: string;
+      }
+    | undefined;
+
+  if (!row) {
+    throw new Error(`Main memory entry ${id} not found.`);
+  }
+
+  return normalizeMainEntryRow(row);
+}
+
+export function listMainEntriesByTags(db: Database.Database, tags: string[], limit = 30): MainEntry[] {
+  const uniqueTags = [...new Set(tags.map((tag) => tag.trim()).filter(Boolean))];
+
+  if (uniqueTags.length === 0) {
+    return [];
+  }
+
+  const whereClause = uniqueTags.map(() => "((',' || COALESCE(tags, '') || ',') LIKE ?)").join(' OR ');
+  const rows = db
+    .prepare(
+      `SELECT id, type, title, content, tags, confidence, created_at, last_verified, superseded_by, sources, file_path
+       FROM memory_main
+       WHERE superseded_by IS NULL AND (${whereClause})
+       ORDER BY last_verified DESC
+       LIMIT ?`,
+    )
+    .all(...uniqueTags.map((tag) => `%,${tag},%`), limit) as Array<{
+    id: number;
+    type: string;
+    title: string;
+    content: string;
+    tags: string | null;
+    confidence: string;
+    created_at: string;
+    last_verified: string;
+    superseded_by: number | null;
+    sources: string | null;
+    file_path: string;
+  }>;
+
+  return rows.map(normalizeMainEntryRow);
+}
+
+export function updateMainEntry(db: Database.Database, entry: MainEntry & { id: number }): void {
+  db.prepare(
+    `UPDATE memory_main
+     SET type = ?, title = ?, content = ?, tags = ?, confidence = ?, created_at = ?, last_verified = ?, superseded_by = ?, sources = ?, file_path = ?
+     WHERE id = ?`,
+  ).run(
+    entry.type,
+    entry.title,
+    entry.content,
+    entry.tags.join(','),
+    entry.confidence,
+    entry.created_at,
+    entry.last_verified,
+    entry.superseded_by ?? null,
+    JSON.stringify(entry.sources),
+    entry.file_path,
+    entry.id,
+  );
+
+  writeFileSync(entry.file_path, buildMarkdown(entry), 'utf8');
+}
+
 export function searchMain(db: Database.Database, query: string, limit = 5): SearchResult[] {
   return db
     .prepare(
@@ -281,6 +486,7 @@ export function readWorkingNotes(memoryDir: string, sessionId: string): WorkingN
   const prefix = `${sessionId}-agent-`;
   return readdirSync(workingDir)
     .filter((fileName) => fileName.startsWith(prefix) && fileName.endsWith('.jsonl'))
+    .sort()
     .flatMap((fileName) => {
       const raw = readFileSync(join(workingDir, fileName), 'utf8').trim();
       if (!raw) {
@@ -292,6 +498,28 @@ export function readWorkingNotes(memoryDir: string, sessionId: string): WorkingN
         .filter(Boolean)
         .map((line) => JSON.parse(line) as WorkingNote);
     });
+}
+
+export function archiveWorkingNotes(memoryDir: string, sessionId: string): number {
+  const workingDir = join(memoryDir, 'working');
+  const archiveDir = join(memoryDir, 'working', 'archive');
+
+  if (!existsSync(workingDir)) {
+    return 0;
+  }
+
+  const prefix = `${sessionId}-agent-`;
+  const matchingFiles = readdirSync(workingDir)
+    .filter(
+    (fileName) => fileName.startsWith(prefix) && fileName.endsWith('.jsonl'),
+    )
+    .sort();
+
+  for (const fileName of matchingFiles) {
+    renameSync(join(workingDir, fileName), join(archiveDir, fileName));
+  }
+
+  return matchingFiles.length;
 }
 
 export function createSession(db: Database.Database, name?: string): Session {
@@ -321,6 +549,16 @@ export function endSession(db: Database.Database, sessionId: string): Session {
   return readSessionRow(db, sessionId);
 }
 
+export function markSessionConsolidated(db: Database.Database, sessionId: string, consolidatedAt = new Date().toISOString()): Session {
+  const result = db.prepare('UPDATE sessions SET consolidated_at = ? WHERE id = ?').run(consolidatedAt, sessionId);
+
+  if (result.changes === 0) {
+    throw new Error(`Session ${sessionId} not found.`);
+  }
+
+  return readSessionRow(db, sessionId);
+}
+
 export function listSessions(db: Database.Database): Session[] {
   const rows = db
     .prepare(
@@ -336,11 +574,43 @@ export function listSessions(db: Database.Database): Session[] {
     consolidated_at: string | null;
   }>;
 
-  return rows.map((row) => ({
-    id: row.id,
-    name: row.name ?? undefined,
-    started_at: row.started_at,
-    ended_at: row.ended_at ?? undefined,
-    consolidated_at: row.consolidated_at ?? undefined,
-  }));
+  return rows.map(normalizeSessionRow);
+}
+
+export function getSession(db: Database.Database, sessionId: string): Session {
+  return readSessionRow(db, sessionId);
+}
+
+export function getMainEntryFilePath(db: Database.Database, id: number): string {
+  const row = db.prepare('SELECT file_path FROM memory_main WHERE id = ?').get(id) as
+    | { file_path: string }
+    | undefined;
+
+  if (!row) {
+    throw new Error(`Main memory entry ${id} not found.`);
+  }
+
+  return row.file_path;
+}
+
+export function appendCorrection(
+  memoryDir: string,
+  correction: {
+    session_id?: string;
+    agent_id?: string;
+    context?: string;
+    agent_did: string;
+    user_corrected_to: string;
+    rationale: string;
+  },
+): void {
+  ensureMemoryLayout(memoryDir);
+  appendFileSync(
+    join(memoryDir, 'corrections.jsonl'),
+    `${JSON.stringify({
+      ts: new Date().toISOString(),
+      ...correction,
+    })}\n`,
+    'utf8',
+  );
 }
