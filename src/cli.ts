@@ -8,8 +8,9 @@ import {
   appendWorkingNote,
   createSession,
   endSession,
-  getSession,
   getMainEntryFilePath,
+  getSession,
+  getStats,
   initDb,
   listSessions,
   readMainEntry,
@@ -17,6 +18,7 @@ import {
   searchMain,
 } from './store.ts';
 import type { Confidence, SearchResult, Session, WorkingNoteType } from './types.ts';
+import type { MemoryStats } from './store.ts';
 
 interface CommonOptions {
   memoryDir: string;
@@ -136,10 +138,42 @@ function formatStatus(status: StatusSummary): string {
     .join('\n');
 }
 
+function formatStats(stats: MemoryStats, memoryDir: string): string {
+  const typeBreakdown = Object.entries(stats.byType)
+    .map(([t, n]) => `${t}: ${n}`)
+    .join('  ') || 'none';
+
+  const confBreakdown = ['high', 'medium', 'low']
+    .filter((c) => stats.byConfidence[c])
+    .map((c) => `${c}: ${stats.byConfidence[c]}`)
+    .join('  ') || 'none';
+
+  const topTagsLine = stats.topTags.map(({ tag, count }) => `${tag} (${count})`).join('  ') || 'none';
+
+  const staleNote = stats.staleEntries > 0 ? `  ⚠  ${stats.staleEntries} not re-verified in 14+ days` : '';
+
+  return [
+    `Memory dir:        ${memoryDir}`,
+    `Entries:           ${stats.activeEntries} active, ${stats.supersededEntries} superseded${staleNote}`,
+    `By type:           ${typeBreakdown}`,
+    `By confidence:     ${confBreakdown}`,
+    `Top tags:          ${topTagsLine}`,
+    `Sessions:          ${stats.totalSessions} total, ${stats.consolidatedSessions} consolidated`,
+  ].join('\n');
+}
+
 function registerCommonOptions(command: Command): Command {
   return command
     .addOption(new Option('--memory-dir <path>', 'Memory directory path.').default(DEFAULT_MEMORY_DIR))
     .option('--json', 'Emit machine-readable JSON.');
+}
+
+function getCommonOptions(command: Command): CommonOptions {
+  const options = command.optsWithGlobals() as CommonOptions;
+  return {
+    memoryDir: options.memoryDir ?? DEFAULT_MEMORY_DIR,
+    json: options.json ?? false,
+  };
 }
 
 function requireAgentId(agentId?: string): string {
@@ -152,6 +186,29 @@ function requireAgentId(agentId?: string): string {
   return resolvedAgentId;
 }
 
+function withDb<T>(memoryDir: string, run: (db: ReturnType<typeof initDb>) => T): T {
+  const db = initDb(memoryDir);
+
+  try {
+    return run(db);
+  } finally {
+    db.close();
+  }
+}
+
+async function withDbAsync<T>(
+  memoryDir: string,
+  run: (db: ReturnType<typeof initDb>) => Promise<T>,
+): Promise<T> {
+  const db = initDb(memoryDir);
+
+  try {
+    return await run(db);
+  } finally {
+    db.close();
+  }
+}
+
 async function main(): Promise<void> {
   const program = new Command();
 
@@ -160,18 +217,20 @@ async function main(): Promise<void> {
     .description('Persistent memory for parallel coding agents.')
     .showHelpAfterError();
 
+  registerCommonOptions(program);
+
   registerCommonOptions(
     program
       .command('init')
       .description('Initialize the .memory directory and SQLite database.'),
-  ).action((options: CommonOptions) => {
-    const memoryDir = resolveMemoryDir(options.memoryDir);
-    const db = initDb(memoryDir);
-    db.close();
+  ).action((_options: CommonOptions, command: Command) => {
+    const common = getCommonOptions(command);
+    const memoryDir = resolveMemoryDir(common.memoryDir);
+    withDb(memoryDir, () => undefined);
 
     printOutput(
-      options.json ? { ok: true, memoryDir } : `Initialized memory store at ${memoryDir}`,
-      options.json,
+      common.json ? { ok: true, memoryDir } : `Initialized memory store at ${memoryDir}`,
+      common.json,
     );
   });
 
@@ -182,13 +241,12 @@ async function main(): Promise<void> {
       .command('start')
       .argument('[name]')
       .description('Start a new session.'),
-  ).action((name: string | undefined, options: CommonOptions) => {
-    const memoryDir = resolveMemoryDir(options.memoryDir);
-    const db = initDb(memoryDir);
-    const created = createSession(db, name);
-    db.close();
+  ).action((name: string | undefined, _options: CommonOptions, command: Command) => {
+    const common = getCommonOptions(command);
+    const memoryDir = resolveMemoryDir(common.memoryDir);
+    const created = withDb(memoryDir, (db) => createSession(db, name));
 
-    printOutput(options.json ? created : created.id, options.json);
+    printOutput(common.json ? created : created.id, common.json);
   });
 
   registerCommonOptions(
@@ -196,32 +254,35 @@ async function main(): Promise<void> {
       .command('end')
       .argument('<session-id>')
       .description('End a session.'),
-  ).action(async (sessionId: string, options: CommonOptions) => {
-    const memoryDir = resolveMemoryDir(options.memoryDir);
-    const db = initDb(memoryDir);
-    const ended = endSession(db, sessionId);
+  ).action(async (sessionId: string, _options: CommonOptions, command: Command) => {
+    const common = getCommonOptions(command);
+    const memoryDir = resolveMemoryDir(common.memoryDir);
     const workingNoteCount = readWorkingNotes(memoryDir, sessionId).length;
 
     try {
-      if (workingNoteCount === 0) {
-        printOutput(
-          options.json ? { session: ended, consolidation: null } : formatEndSession(ended, 'No working notes to consolidate.'),
-          options.json,
-        );
-        return;
-      }
+      const result = await withDbAsync(memoryDir, async (db) => {
+        const ended = endSession(db, sessionId);
 
-      const consolidation = await consolidateSession(db, memoryDir, sessionId);
-      const updatedSession = getSession(db, sessionId);
+        if (workingNoteCount === 0) {
+          return { session: ended, consolidation: null };
+        }
+
+        const consolidation = await consolidateSession(db, memoryDir, sessionId);
+        return {
+          session: getSession(db, sessionId),
+          consolidation,
+        };
+      });
+
       printOutput(
-        options.json ? { session: updatedSession, consolidation } : formatEndSession(updatedSession, consolidation.summary),
-        options.json,
+        common.json
+          ? result
+          : formatEndSession(result.session, result.consolidation?.summary ?? 'No working notes to consolidate.'),
+        common.json,
       );
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Session ${sessionId} was ended, but consolidation failed: ${message}`);
-    } finally {
-      db.close();
     }
   });
 
@@ -229,13 +290,12 @@ async function main(): Promise<void> {
     session
       .command('list')
       .description('List recent sessions.'),
-  ).action((options: CommonOptions) => {
-    const memoryDir = resolveMemoryDir(options.memoryDir);
-    const db = initDb(memoryDir);
-    const sessions = listSessions(db);
-    db.close();
+  ).action((_options: CommonOptions, command: Command) => {
+    const common = getCommonOptions(command);
+    const memoryDir = resolveMemoryDir(common.memoryDir);
+    const sessions = withDb(memoryDir, (db) => listSessions(db));
 
-    if (options.json) {
+    if (common.json) {
       printOutput(sessions, true);
       return;
     }
@@ -256,11 +316,12 @@ async function main(): Promise<void> {
       )
       .option('--session-id <id>', 'Session ID. Defaults to REPLICAS_MEMORY_SESSION_ID.')
       .option('--agent-id <id>', 'Agent ID. Defaults to REPLICAS_MEMORY_AGENT_ID.'),
-  ).action((content: string, options: NoteOptions) => {
-    const memoryDir = resolveMemoryDir(options.memoryDir);
-    const db = initDb(memoryDir);
-    const { session } = resolveSessionContext(db, memoryDir, options.sessionId);
+  ).action((content: string, options: NoteOptions, command: Command) => {
+    const common = getCommonOptions(command);
+    const memoryDir = resolveMemoryDir(common.memoryDir);
     const agentId = requireAgentId(options.agentId);
+    const tags = parseTags(options.tags);
+    const session = withDb(memoryDir, (db) => resolveSessionContext(db, memoryDir, options.sessionId).session);
 
     appendWorkingNote(memoryDir, {
       ts: new Date().toISOString(),
@@ -268,17 +329,13 @@ async function main(): Promise<void> {
       agent_id: agentId,
       type: options.type ?? 'observation',
       content,
-      tags: parseTags(options.tags),
+      tags,
       confidence: options.confidence ?? 'medium',
     });
 
-    db.close();
-
     printOutput(
-      options.json
-        ? { ok: true, session_id: session.id, agent_id: agentId, content, tags: parseTags(options.tags) }
-        : `Wrote working note for ${session.id} (${agentId}).`,
-      options.json,
+      common.json ? { ok: true, session_id: session.id, agent_id: agentId, content, tags } : `Wrote working note for ${session.id} (${agentId}).`,
+      common.json,
     );
   });
 
@@ -288,13 +345,12 @@ async function main(): Promise<void> {
       .argument('<query>')
       .description('Search consolidated main memory.')
       .option('--limit <n>', 'Maximum number of results.', '5'),
-  ).action((query: string, options: SearchOptions) => {
-    const memoryDir = resolveMemoryDir(options.memoryDir);
-    const db = initDb(memoryDir);
-    const results = searchMain(db, query, parseLimit(options.limit));
-    db.close();
+  ).action((query: string, options: SearchOptions, command: Command) => {
+    const common = getCommonOptions(command);
+    const memoryDir = resolveMemoryDir(common.memoryDir);
+    const results = withDb(memoryDir, (db) => searchMain(db, query, parseLimit(options.limit)));
 
-    printOutput(options.json ? results : formatSearchResults(results), options.json);
+    printOutput(common.json ? results : formatSearchResults(results), common.json);
   });
 
   registerCommonOptions(
@@ -302,17 +358,15 @@ async function main(): Promise<void> {
       .command('read')
       .argument('<file-path-or-id>')
       .description('Read a consolidated memory entry.'),
-  ).action((filePathOrId: string, options: CommonOptions) => {
-    const memoryDir = resolveMemoryDir(options.memoryDir);
-    const db = initDb(memoryDir);
-
-    const filePath =
-      /^\d+$/.test(filePathOrId) ? getMainEntryFilePath(db, Number(filePathOrId)) : resolve(process.cwd(), filePathOrId);
+  ).action((filePathOrId: string, _options: CommonOptions, command: Command) => {
+    const common = getCommonOptions(command);
+    const memoryDir = resolveMemoryDir(common.memoryDir);
+    const filePath = /^\d+$/.test(filePathOrId)
+      ? withDb(memoryDir, (db) => getMainEntryFilePath(db, Number(filePathOrId)))
+      : resolve(process.cwd(), filePathOrId);
     const entry = readMainEntry(filePath);
 
-    db.close();
-
-    if (options.json) {
+    if (common.json) {
       printOutput(entry, true);
       return;
     }
@@ -336,9 +390,11 @@ async function main(): Promise<void> {
       shouldBe: string,
       rationale: string,
       options: CommonOptions & { sessionId?: string; agentId?: string; context?: string },
+      command: Command,
     ) => {
-      const memoryDir = resolveMemoryDir(options.memoryDir);
-      initDb(memoryDir).close();
+      const common = getCommonOptions(command);
+      const memoryDir = resolveMemoryDir(common.memoryDir);
+      withDb(memoryDir, () => undefined);
 
       appendCorrection(memoryDir, {
         session_id: options.sessionId ?? process.env.REPLICAS_MEMORY_SESSION_ID,
@@ -350,10 +406,10 @@ async function main(): Promise<void> {
       });
 
       printOutput(
-        options.json
+        common.json
           ? { ok: true, agent_did: agentDid, user_corrected_to: shouldBe }
           : 'Appended correction to corrections.jsonl.',
-        options.json,
+        common.json,
       );
     },
   );
@@ -363,34 +419,47 @@ async function main(): Promise<void> {
       .command('consolidate')
       .argument('<session-id>')
       .description('Run the consolidation pass for a session.'),
-  ).action(async (sessionId: string, options: CommonOptions) => {
-    const memoryDir = resolveMemoryDir(options.memoryDir);
-    const db = initDb(memoryDir);
-    const result = await consolidateSession(db, memoryDir, sessionId);
-    db.close();
+  ).action(async (sessionId: string, _options: CommonOptions, command: Command) => {
+    const common = getCommonOptions(command);
+    const memoryDir = resolveMemoryDir(common.memoryDir);
+    const result = await withDbAsync(memoryDir, (db) => consolidateSession(db, memoryDir, sessionId));
 
-    printOutput(options.json ? result : result.summary, options.json);
+    printOutput(common.json ? result : result.summary, common.json);
+  });
+
+  registerCommonOptions(
+    program
+      .command('stats')
+      .description('Show memory health statistics.'),
+  ).action((_options: CommonOptions, command: Command) => {
+    const common = getCommonOptions(command);
+    const memoryDir = resolveMemoryDir(common.memoryDir);
+    const stats = withDb(memoryDir, (db) => getStats(db));
+
+    printOutput(common.json ? stats : formatStats(stats, memoryDir), common.json);
   });
 
   registerCommonOptions(
     program
       .command('status')
       .description('Show current memory status.'),
-  ).action((options: CommonOptions) => {
-    const memoryDir = resolveMemoryDir(options.memoryDir);
-    const db = initDb(memoryDir);
+  ).action((_options: CommonOptions, command: Command) => {
+    const common = getCommonOptions(command);
+    const memoryDir = resolveMemoryDir(common.memoryDir);
     const sessionId = process.env.REPLICAS_MEMORY_SESSION_ID;
-    const sessions = listSessions(db);
-    const summary: StatusSummary = {
-      memoryDir,
-      sessionId,
-      workingNoteCount: sessionId ? readWorkingNotes(memoryDir, sessionId).length : 0,
-      sessionCount: sessions.length,
-      latestSession: sessions[0],
-    };
-    db.close();
+    const summary = withDb(memoryDir, (db) => {
+      const sessions = listSessions(db);
 
-    printOutput(options.json ? summary : formatStatus(summary), options.json);
+      return {
+        memoryDir,
+        sessionId,
+        workingNoteCount: sessionId ? readWorkingNotes(memoryDir, sessionId).length : 0,
+        sessionCount: sessions.length,
+        latestSession: sessions[0],
+      };
+    });
+
+    printOutput(common.json ? summary : formatStatus(summary), common.json);
   });
 
   await program.parseAsync();

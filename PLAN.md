@@ -166,11 +166,13 @@ Goal: everything works, demo is clean, README is sharp, you can submit with conf
 
 - [ ] Clone the repo to a fresh directory and run the demo from scratch — verify it actually works for real
 - [ ] Read through the README one more time, fix any rough spots
-- [ ] Read through the source code, fix any obviously bad names or comments
+- [x] Read through the source code, fix any obviously bad names or comments
 - [ ] Make sure `.gitignore` excludes `.memory/`, `node_modules/`, `.env`, `*.log`
 - [ ] Add a `.env.example` showing `ANTHROPIC_API_KEY=...`
 - [ ] If anything is broken and you have time, fix it. If anything is broken and you don't, document it as a known limitation in the README.
 - [ ] Submit.
+
+Deviation note: did a small readability/cleanup pass in `src/cli.ts` and `src/store.ts`, mainly consolidating repeated DB lifecycle and JSONL parsing logic while preserving the existing CLI surface.
 
 ---
 

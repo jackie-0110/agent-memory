@@ -3,15 +3,7 @@ import type { Correction, MainEntry, WorkingNote } from './types.ts';
 function formatWorkingNotes(workingNotes: WorkingNote[]): string {
   return workingNotes
     .map((note, index) =>
-      [
-        `#${index}`,
-        `agent=${note.agent_id}`,
-        `ts=${note.ts}`,
-        `type=${note.type}`,
-        `confidence=${note.confidence}`,
-        `tags=${note.tags.join(', ') || 'none'}`,
-        `content=${note.content}`,
-      ].join(' | '),
+      `[${index}] ${note.agent_id} | ${note.type} | ${note.confidence} confidence | tags: ${note.tags.join(', ') || 'none'}\n    ${note.content}`,
     )
     .join('\n');
 }

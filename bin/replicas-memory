@@ -1,2 +1,4 @@
 #!/usr/bin/env bash
-exec npx tsx "$(dirname "$0")/../src/cli.ts" "$@"
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_DIR"
+exec corepack yarn tsx "$REPO_DIR/src/cli.ts" "$@"
