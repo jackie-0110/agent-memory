@@ -18,7 +18,7 @@ step() { echo -e "\n$THIN\n  $1\n$THIN"; }
 # ── Cleanup from any previous run ─────────────────────────────────
 rm -rf "$MEMORY_DIR"
 
-hr "replicas-memory — CLI smoke test"
+hr "replicas-memory — CLI test"
 
 # ── init ──────────────────────────────────────────────────────────
 step "init"

@@ -1,4 +1,6 @@
+import chalk from 'chalk';
 import { Command, Option } from 'commander';
+import ora from 'ora';
 import { resolve } from 'node:path';
 
 import { consolidateSession } from './consolidate.ts';
@@ -17,8 +19,8 @@ import {
   readWorkingNotes,
   searchMain,
 } from './store.ts';
-import type { Confidence, SearchResult, Session, WorkingNoteType } from './types.ts';
 import type { MemoryStats } from './store.ts';
+import type { ConsolidationAction, Confidence, SearchResult, Session, WorkingNoteType } from './types.ts';
 
 interface CommonOptions {
   memoryDir: string;
@@ -56,6 +58,125 @@ const WORKING_NOTE_TYPES: WorkingNoteType[] = [
 ];
 const CONFIDENCE_LEVELS: Confidence[] = ['low', 'medium', 'high'];
 
+// ── Color helpers ────────────────────────────────────────────────
+
+function confidenceColor(c: Confidence): string {
+  if (c === 'high') return chalk.green(c);
+  if (c === 'medium') return chalk.yellow(c);
+  return chalk.red(c);
+}
+
+function confidenceDot(c: Confidence): string {
+  if (c === 'high') return chalk.green('●');
+  if (c === 'medium') return chalk.yellow('●');
+  return chalk.red('●');
+}
+
+function bar(value: number, max: number, width = 12): string {
+  const filled = max > 0 ? Math.round((value / max) * width) : 0;
+  return chalk.cyan('█'.repeat(filled)) + chalk.dim('░'.repeat(Math.max(0, width - filled)));
+}
+
+// ── Formatters ───────────────────────────────────────────────────
+
+function actionCountSummary(actions: ConsolidationAction[]): string {
+  const counts: Record<string, number> = {};
+  for (const a of actions) counts[a.action] = (counts[a.action] ?? 0) + 1;
+  return Object.entries(counts)
+    .filter(([, n]) => n > 0)
+    .map(([k, n]) => `${k} ×${n}`)
+    .join(', ');
+}
+
+function formatSession(session: Session): string {
+  return [
+    `${chalk.dim('Session:')}      ${session.id}`,
+    session.name ? `${chalk.dim('Name:')}         ${session.name}` : undefined,
+    `${chalk.dim('Started:')}      ${session.started_at}`,
+    session.ended_at
+      ? `${chalk.dim('Ended:')}        ${session.ended_at}`
+      : `${chalk.dim('Ended:')}        ${chalk.green('active')}`,
+    session.consolidated_at
+      ? `${chalk.dim('Consolidated:')} ${session.consolidated_at}`
+      : `${chalk.dim('Consolidated:')} ${chalk.yellow('pending')}`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+function formatSearchResults(results: SearchResult[]): string {
+  if (results.length === 0) {
+    return chalk.dim('No matching main-memory entries found.');
+  }
+
+  return results
+    .map((result, i) => {
+      const badge = `${confidenceColor(result.confidence)} · ${chalk.dim(result.type)}`;
+      return [
+        `${chalk.dim(`[${i + 1}]`)}  ${chalk.bold(result.title)}  ${badge}`,
+        `     ${chalk.dim(result.file_path)}`,
+        `     ${result.snippet}`,
+      ].join('\n');
+    })
+    .join('\n\n');
+}
+
+function formatStatus(status: StatusSummary): string {
+  return [
+    `${chalk.dim('Memory dir:')}               ${status.memoryDir}`,
+    `${chalk.dim('Current session:')}          ${status.sessionId ?? chalk.dim('none')}`,
+    `${chalk.dim('Working notes in session:')} ${status.workingNoteCount}`,
+    `${chalk.dim('Known sessions:')}           ${status.sessionCount}`,
+    status.latestSession
+      ? `${chalk.dim('Latest session:')}           ${status.latestSession.id}`
+      : undefined,
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+function formatStats(stats: MemoryStats, memoryDir: string): string {
+  const typeMax = Math.max(0, ...Object.values(stats.byType));
+  const typeLines = Object.entries(stats.byType)
+    .sort(([, a], [, b]) => b - a)
+    .map(([t, n]) => `  ${t.padEnd(14)} ${bar(n, typeMax)}  ${n}`)
+    .join('\n') || `  ${chalk.dim('none')}`;
+
+  const confMax = Math.max(0, ...Object.values(stats.byConfidence));
+  const confLines = (['high', 'medium', 'low'] as Confidence[])
+    .filter((c) => stats.byConfidence[c])
+    .map((c) => {
+      const n = stats.byConfidence[c] ?? 0;
+      return `  ${confidenceDot(c)} ${c.padEnd(8)} ${bar(n, confMax)}  ${n}`;
+    })
+    .join('\n') || `  ${chalk.dim('none')}`;
+
+  const topTagsLine =
+    stats.topTags.map(({ tag, count }) => `${chalk.cyan(tag)} (${count})`).join('  ') ||
+    chalk.dim('none');
+
+  const staleWarning =
+    stats.staleEntries > 0
+      ? `  ${chalk.yellow(`⚠  ${stats.staleEntries} not re-verified in 14+ days`)}`
+      : '';
+
+  return [
+    `${chalk.dim('Memory dir:')}   ${memoryDir}`,
+    `${chalk.dim('Entries:')}      ${chalk.bold(String(stats.activeEntries))} active, ${stats.supersededEntries} superseded${staleWarning}`,
+    '',
+    chalk.dim('By type:'),
+    typeLines,
+    '',
+    chalk.dim('By confidence:'),
+    confLines,
+    '',
+    `${chalk.dim('Top tags:')}     ${topTagsLine}`,
+    `${chalk.dim('Sessions:')}     ${stats.totalSessions} total, ${stats.consolidatedSessions} consolidated`,
+  ].join('\n');
+}
+
+// ── Plumbing ─────────────────────────────────────────────────────
+
 function resolveMemoryDir(memoryDir?: string): string {
   return resolve(process.cwd(), memoryDir ?? DEFAULT_MEMORY_DIR);
 }
@@ -89,77 +210,6 @@ function printOutput(payload: unknown, asJson = false): void {
   }
 
   console.log(payload);
-}
-
-function formatSession(session: Session): string {
-  return [
-    `Session: ${session.id}`,
-    session.name ? `Name: ${session.name}` : undefined,
-    `Started: ${session.started_at}`,
-    session.ended_at ? `Ended: ${session.ended_at}` : 'Ended: active',
-    session.consolidated_at ? `Consolidated: ${session.consolidated_at}` : 'Consolidated: pending',
-  ]
-    .filter(Boolean)
-    .join('\n');
-}
-
-function formatEndSession(session: Session, consolidationSummary?: string): string {
-  return [formatSession(session), consolidationSummary].filter(Boolean).join('\n');
-}
-
-function formatSearchResults(results: SearchResult[]): string {
-  if (results.length === 0) {
-    return 'No matching main-memory entries found.';
-  }
-
-  return results
-    .map(
-      (result) =>
-        [
-          `${result.id}: ${result.title}`,
-          `Path: ${result.file_path}`,
-          `Confidence: ${result.confidence}`,
-          `Verified: ${result.last_verified}`,
-          `Snippet: ${result.snippet}`,
-        ].join('\n'),
-    )
-    .join('\n\n');
-}
-
-function formatStatus(status: StatusSummary): string {
-  return [
-    `Memory dir: ${status.memoryDir}`,
-    `Current session: ${status.sessionId ?? 'none'}`,
-    `Working notes in current session: ${status.workingNoteCount}`,
-    `Known sessions: ${status.sessionCount}`,
-    status.latestSession ? `Latest session: ${status.latestSession.id}` : undefined,
-  ]
-    .filter(Boolean)
-    .join('\n');
-}
-
-function formatStats(stats: MemoryStats, memoryDir: string): string {
-  const typeBreakdown = Object.entries(stats.byType)
-    .map(([t, n]) => `${t}: ${n}`)
-    .join('  ') || 'none';
-
-  const confBreakdown = ['high', 'medium', 'low']
-    .filter((c) => stats.byConfidence[c])
-    .map((c) => `${c}: ${stats.byConfidence[c]}`)
-    .join('  ') || 'none';
-
-  const topTagsLine = stats.topTags.map(({ tag, count }) => `${tag} (${count})`).join('  ') || 'none';
-
-  const staleNote = stats.staleEntries > 0 ? `  ⚠  ${stats.staleEntries} not re-verified in 14+ days` : '';
-
-  return [
-    `Memory dir:        ${memoryDir}`,
-    `Entries:           ${stats.activeEntries} active, ${stats.supersededEntries} superseded${staleNote}`,
-    `By type:           ${typeBreakdown}`,
-    `By confidence:     ${confBreakdown}`,
-    `Top tags:          ${topTagsLine}`,
-    `Sessions:          ${stats.totalSessions} total, ${stats.consolidatedSessions} consolidated`,
-  ].join('\n');
 }
 
 function registerCommonOptions(command: Command): Command {
@@ -209,6 +259,8 @@ async function withDbAsync<T>(
   }
 }
 
+// ── Commands ─────────────────────────────────────────────────────
+
 async function main(): Promise<void> {
   const program = new Command();
 
@@ -219,6 +271,7 @@ async function main(): Promise<void> {
 
   registerCommonOptions(program);
 
+  // init
   registerCommonOptions(
     program
       .command('init')
@@ -229,15 +282,21 @@ async function main(): Promise<void> {
     withDb(memoryDir, () => undefined);
 
     printOutput(
-      common.json ? { ok: true, memoryDir } : `Initialized memory store at ${memoryDir}`,
+      common.json
+        ? { ok: true, memoryDir }
+        : [
+            `${chalk.green('✓')} Initialized ${chalk.bold(memoryDir)}`,
+            chalk.dim('  working/   main/decisions/   main/debugging/   main/conventions/   main/architecture/'),
+          ].join('\n'),
       common.json,
     );
   });
 
-  const session = program.command('session').description('Manage memory sessions.');
+  const sessionCmd = program.command('session').description('Manage memory sessions.');
 
+  // session start
   registerCommonOptions(
-    session
+    sessionCmd
       .command('start')
       .argument('[name]')
       .description('Start a new session.'),
@@ -249,45 +308,65 @@ async function main(): Promise<void> {
     printOutput(common.json ? created : created.id, common.json);
   });
 
+  // session end
   registerCommonOptions(
-    session
+    sessionCmd
       .command('end')
-      .argument('<session-id>')
-      .description('End a session.'),
-  ).action(async (sessionId: string, _options: CommonOptions, command: Command) => {
+      .argument('[session-id]')
+      .description('End a session and consolidate its working notes. Defaults to REPLICAS_MEMORY_SESSION_ID.'),
+  ).action(async (sessionIdArg: string | undefined, _options: CommonOptions, command: Command) => {
     const common = getCommonOptions(command);
     const memoryDir = resolveMemoryDir(common.memoryDir);
-    const workingNoteCount = readWorkingNotes(memoryDir, sessionId).length;
+    const sessionId = sessionIdArg ?? process.env.REPLICAS_MEMORY_SESSION_ID;
+
+    if (!sessionId) {
+      throw new Error('No session ID provided. Pass one explicitly or set REPLICAS_MEMORY_SESSION_ID.');
+    }
+    const noteCount = readWorkingNotes(memoryDir, sessionId).length;
+
+    const spinner =
+      !common.json && noteCount > 0
+        ? ora(`Consolidating ${noteCount} working ${noteCount === 1 ? 'note' : 'notes'}...`).start()
+        : null;
 
     try {
       const result = await withDbAsync(memoryDir, async (db) => {
         const ended = endSession(db, sessionId);
 
-        if (workingNoteCount === 0) {
+        if (noteCount === 0) {
           return { session: ended, consolidation: null };
         }
 
         const consolidation = await consolidateSession(db, memoryDir, sessionId);
-        return {
-          session: getSession(db, sessionId),
-          consolidation,
-        };
+        return { session: getSession(db, sessionId), consolidation };
       });
 
-      printOutput(
-        common.json
-          ? result
-          : formatEndSession(result.session, result.consolidation?.summary ?? 'No working notes to consolidate.'),
-        common.json,
-      );
+      if (common.json) {
+        printOutput(result, true);
+        return;
+      }
+
+      if (spinner && result.consolidation) {
+        spinner.succeed(
+          `Consolidated ${noteCount} notes  (${actionCountSummary(result.consolidation.actions)})`,
+        );
+      } else if (spinner) {
+        spinner.succeed('Session ended');
+      } else {
+        console.log(chalk.dim('No working notes to consolidate.'));
+      }
+
+      console.log(formatSession(result.session));
     } catch (error: unknown) {
+      spinner?.fail('Consolidation failed');
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Session ${sessionId} was ended, but consolidation failed: ${message}`);
     }
   });
 
+  // session list
   registerCommonOptions(
-    session
+    sessionCmd
       .command('list')
       .description('List recent sessions.'),
   ).action((_options: CommonOptions, command: Command) => {
@@ -300,10 +379,14 @@ async function main(): Promise<void> {
       return;
     }
 
-    const text = sessions.length === 0 ? 'No sessions found.' : sessions.map(formatSession).join('\n\n');
+    const text =
+      sessions.length === 0
+        ? chalk.dim('No sessions found.')
+        : sessions.map(formatSession).join('\n\n');
     printOutput(text, false);
   });
 
+  // note
   registerCommonOptions(
     program
       .command('note')
@@ -321,24 +404,29 @@ async function main(): Promise<void> {
     const memoryDir = resolveMemoryDir(common.memoryDir);
     const agentId = requireAgentId(options.agentId);
     const tags = parseTags(options.tags);
+    const noteType = options.type ?? 'observation';
+    const confidence = options.confidence ?? 'medium';
     const session = withDb(memoryDir, (db) => resolveSessionContext(db, memoryDir, options.sessionId).session);
 
     appendWorkingNote(memoryDir, {
       ts: new Date().toISOString(),
       session_id: session.id,
       agent_id: agentId,
-      type: options.type ?? 'observation',
+      type: noteType,
       content,
       tags,
-      confidence: options.confidence ?? 'medium',
+      confidence,
     });
 
     printOutput(
-      common.json ? { ok: true, session_id: session.id, agent_id: agentId, content, tags } : `Wrote working note for ${session.id} (${agentId}).`,
+      common.json
+        ? { ok: true, session_id: session.id, agent_id: agentId, content, tags }
+        : `${chalk.green('✓')} ${chalk.dim(`[${noteType} · ${confidence}]`)}  ${chalk.cyan(tags.join(', '))}  →  ${session.id} (${agentId})`,
       common.json,
     );
   });
 
+  // search
   registerCommonOptions(
     program
       .command('search')
@@ -353,6 +441,7 @@ async function main(): Promise<void> {
     printOutput(common.json ? results : formatSearchResults(results), common.json);
   });
 
+  // read
   registerCommonOptions(
     program
       .command('read')
@@ -371,9 +460,13 @@ async function main(): Promise<void> {
       return;
     }
 
-    printOutput(`${entry.title}\n${entry.file_path}\n\n${entry.content}`, false);
+    printOutput(
+      `${chalk.bold(entry.title)}  ${confidenceDot(entry.confidence)} ${confidenceColor(entry.confidence)} · ${chalk.dim(entry.type)}\n${chalk.dim(entry.file_path)}\n\n${entry.content}`,
+      false,
+    );
   });
 
+  // correct
   registerCommonOptions(
     program
       .command('correct')
@@ -408,12 +501,13 @@ async function main(): Promise<void> {
       printOutput(
         common.json
           ? { ok: true, agent_did: agentDid, user_corrected_to: shouldBe }
-          : 'Appended correction to corrections.jsonl.',
+          : `${chalk.green('✓')} Correction appended to corrections.jsonl`,
         common.json,
       );
     },
   );
 
+  // consolidate
   registerCommonOptions(
     program
       .command('consolidate')
@@ -422,11 +516,27 @@ async function main(): Promise<void> {
   ).action(async (sessionId: string, _options: CommonOptions, command: Command) => {
     const common = getCommonOptions(command);
     const memoryDir = resolveMemoryDir(common.memoryDir);
-    const result = await withDbAsync(memoryDir, (db) => consolidateSession(db, memoryDir, sessionId));
+    const noteCount = readWorkingNotes(memoryDir, sessionId).length;
 
-    printOutput(common.json ? result : result.summary, common.json);
+    const spinner = !common.json
+      ? ora(`Consolidating ${noteCount} working ${noteCount === 1 ? 'note' : 'notes'}...`).start()
+      : null;
+
+    try {
+      const result = await withDbAsync(memoryDir, (db) => consolidateSession(db, memoryDir, sessionId));
+
+      if (spinner) {
+        spinner.succeed(`Consolidated ${noteCount} notes  (${actionCountSummary(result.actions)})`);
+      } else {
+        printOutput(result, true);
+      }
+    } catch (error: unknown) {
+      spinner?.fail('Consolidation failed');
+      throw error;
+    }
   });
 
+  // stats
   registerCommonOptions(
     program
       .command('stats')
@@ -439,6 +549,7 @@ async function main(): Promise<void> {
     printOutput(common.json ? stats : formatStats(stats, memoryDir), common.json);
   });
 
+  // status
   registerCommonOptions(
     program
       .command('status')
@@ -467,6 +578,6 @@ async function main(): Promise<void> {
 
 main().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
-  console.error(message);
+  console.error(chalk.red(`Error: ${message}`));
   process.exitCode = 1;
 });

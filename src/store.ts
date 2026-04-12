@@ -436,6 +436,7 @@ export function searchMain(db: Database.Database, query: string, limit = 5): Sea
     .prepare(
       `SELECT
         memory_main.id AS id,
+        memory_main.type AS type,
         memory_main.title AS title,
         snippet(memory_fts, 1, '[', ']', '...', 12) AS snippet,
         memory_main.file_path AS file_path,

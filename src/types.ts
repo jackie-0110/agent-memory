@@ -58,6 +58,7 @@ export interface ConsolidationAction {
 
 export interface SearchResult {
   id: number;
+  type: MemoryType;
   title: string;
   snippet: string;
   file_path: string;
