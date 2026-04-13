@@ -1,4 +1,3 @@
-import Anthropic from '@anthropic-ai/sdk';
 import Database from 'better-sqlite3';
 
 import { buildConsolidationPrompt } from './prompts.ts';
@@ -8,21 +7,25 @@ import {
   getSession,
   listMainEntriesByTags,
   markSessionConsolidated,
+  readCorrections,
   readWorkingNotes,
   updateMainEntry,
   writeMainEntry,
 } from './store.ts';
-import type { ConsolidationAction, MainEntry, WorkingNote } from './types.ts';
+import type { ConsolidationAction, Correction, MainEntry, WorkingNote } from './types.ts';
 
 export interface ConsolidationContext {
   workingNotes: WorkingNote[];
   relatedEntries: MainEntry[];
+  corrections: Correction[];
 }
 
 export interface ConsolidationResult {
   actionsApplied: number;
   archivedFiles: number;
   summary: string;
+  actions: ConsolidationAction[];
+  workingNotes: WorkingNote[];
 }
 
 const VALID_ACTIONS = new Set<ConsolidationAction['action']>(['PROMOTE', 'MERGE', 'SUPERSEDE', 'DISCARD']);
@@ -38,8 +41,9 @@ export function gatherContext(
   const workingNotes = readWorkingNotes(memoryDir, sessionId);
   const allTags = [...new Set(workingNotes.flatMap((note) => note.tags))];
   const relatedEntries = listMainEntriesByTags(db, allTags, 30);
+  const corrections = readCorrections(memoryDir);
 
-  return { workingNotes, relatedEntries };
+  return { workingNotes, relatedEntries, corrections };
 }
 
 function stripJsonFences(responseText: string): string {
@@ -201,26 +205,38 @@ function mergeContent(existingContent: string, incomingContent?: string | null):
 }
 
 async function callLlm(prompt: string): Promise<string> {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error('ANTHROPIC_API_KEY is required to run consolidation.');
+  const apiKey = process.env.LITELLM_API_KEY;
+  if (!apiKey) {
+    throw new Error('LITELLM_API_KEY is required to run consolidation.');
   }
 
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const response = await client.messages.create({
-    model: 'claude-haiku-4-5',
-    max_tokens: 4000,
-    temperature: 0,
-    messages: [{ role: 'user', content: prompt }],
+  const baseUrl = process.env.LITELLM_BASE_URL ?? 'https://api.ai.it.ufl.edu';
+  const model = process.env.LITELLM_MODEL ?? 'gpt-4o-mini';
+
+  const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 4000,
+      temperature: 0,
+      messages: [{ role: 'user', content: prompt }],
+    }),
   });
 
-  const text = response.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('\n')
-    .trim();
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`LiteLLM API error ${res.status}: ${body}`);
+  }
+
+  const data = await res.json() as { choices: Array<{ message: { content: string } }> };
+  const text = data.choices[0]?.message?.content?.trim();
 
   if (!text) {
-    throw new Error('Claude returned an empty consolidation response.');
+    throw new Error('LiteLLM returned an empty consolidation response.');
   }
 
   return text;
@@ -317,7 +333,7 @@ export async function consolidateSession(
     throw new Error(`No working notes found for session ${sessionId}.`);
   }
 
-  const prompt = buildConsolidationPrompt(context.workingNotes, context.relatedEntries);
+  const prompt = buildConsolidationPrompt(context.workingNotes, context.relatedEntries, context.corrections);
   const responseText = await callLlm(prompt);
   const actions = parseActions(responseText);
   const actionsApplied = applyActions(db, memoryDir, sessionId, actions);
@@ -328,5 +344,7 @@ export async function consolidateSession(
     actionsApplied,
     archivedFiles,
     summary: `Consolidated ${context.workingNotes.length} working notes into ${actionsApplied} main-memory changes.`,
+    actions,
+    workingNotes: context.workingNotes,
   };
 }

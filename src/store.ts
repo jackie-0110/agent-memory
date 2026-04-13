@@ -4,7 +4,29 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renam
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import type { MainEntry, SearchResult, Session, WorkingNote } from './types.ts';
+import type { Correction, MainEntry, SearchResult, Session, WorkingNote } from './types.ts';
+
+type MainEntryRow = {
+  id: number;
+  type: string;
+  title: string;
+  content: string;
+  tags: string | null;
+  confidence: string;
+  created_at: string;
+  last_verified: string;
+  superseded_by: number | null;
+  sources: string | null;
+  file_path: string;
+};
+
+type SessionRow = {
+  id: string;
+  name: string | null;
+  started_at: string;
+  ended_at: string | null;
+  consolidated_at: string | null;
+};
 
 const MAIN_DIRS = {
   decision: 'decisions',
@@ -184,19 +206,23 @@ function parseSources(rawSources: string | null): MainEntry['sources'] {
   });
 }
 
-function normalizeMainEntryRow(row: {
-  id: number;
-  type: string;
-  title: string;
-  content: string;
-  tags: string | null;
-  confidence: string;
-  created_at: string;
-  last_verified: string;
-  superseded_by: number | null;
-  sources: string | null;
-  file_path: string;
-}): MainEntry {
+function readJsonLines<T>(filePath: string): T[] {
+  if (!existsSync(filePath)) {
+    return [];
+  }
+
+  const raw = readFileSync(filePath, 'utf8').trim();
+  if (!raw) {
+    return [];
+  }
+
+  return raw
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as T);
+}
+
+function normalizeMainEntryRow(row: MainEntryRow): MainEntry {
   return {
     id: row.id,
     type: row.type as MainEntry['type'],
@@ -219,36 +245,15 @@ function readSessionRow(db: Database.Database, sessionId: string): Session {
        FROM sessions
        WHERE id = ?`,
     )
-    .get(sessionId) as
-    | {
-        id: string;
-        name: string | null;
-        started_at: string;
-        ended_at: string | null;
-        consolidated_at: string | null;
-      }
-    | undefined;
+    .get(sessionId) as SessionRow | undefined;
 
   if (!row) {
     throw new Error(`Session ${sessionId} not found.`);
   }
-
-  return {
-    id: row.id,
-    name: row.name ?? undefined,
-    started_at: row.started_at,
-    ended_at: row.ended_at ?? undefined,
-    consolidated_at: row.consolidated_at ?? undefined,
-  };
+  return normalizeSessionRow(row);
 }
 
-function normalizeSessionRow(row: {
-  id: string;
-  name: string | null;
-  started_at: string;
-  ended_at: string | null;
-  consolidated_at: string | null;
-}): Session {
+function normalizeSessionRow(row: SessionRow): Session {
   return {
     id: row.id,
     name: row.name ?? undefined,
@@ -374,21 +379,7 @@ export function getMainEntry(db: Database.Database, id: number): MainEntry {
        FROM memory_main
        WHERE id = ?`,
     )
-    .get(id) as
-    | {
-        id: number;
-        type: string;
-        title: string;
-        content: string;
-        tags: string | null;
-        confidence: string;
-        created_at: string;
-        last_verified: string;
-        superseded_by: number | null;
-        sources: string | null;
-        file_path: string;
-      }
-    | undefined;
+    .get(id) as MainEntryRow | undefined;
 
   if (!row) {
     throw new Error(`Main memory entry ${id} not found.`);
@@ -413,19 +404,7 @@ export function listMainEntriesByTags(db: Database.Database, tags: string[], lim
        ORDER BY last_verified DESC
        LIMIT ?`,
     )
-    .all(...uniqueTags.map((tag) => `%,${tag},%`), limit) as Array<{
-    id: number;
-    type: string;
-    title: string;
-    content: string;
-    tags: string | null;
-    confidence: string;
-    created_at: string;
-    last_verified: string;
-    superseded_by: number | null;
-    sources: string | null;
-    file_path: string;
-  }>;
+    .all(...uniqueTags.map((tag) => `%,${tag},%`), limit) as MainEntryRow[];
 
   return rows.map(normalizeMainEntryRow);
 }
@@ -457,6 +436,7 @@ export function searchMain(db: Database.Database, query: string, limit = 5): Sea
     .prepare(
       `SELECT
         memory_main.id AS id,
+        memory_main.type AS type,
         memory_main.title AS title,
         snippet(memory_fts, 1, '[', ']', '...', 12) AS snippet,
         memory_main.file_path AS file_path,
@@ -487,17 +467,7 @@ export function readWorkingNotes(memoryDir: string, sessionId: string): WorkingN
   return readdirSync(workingDir)
     .filter((fileName) => fileName.startsWith(prefix) && fileName.endsWith('.jsonl'))
     .sort()
-    .flatMap((fileName) => {
-      const raw = readFileSync(join(workingDir, fileName), 'utf8').trim();
-      if (!raw) {
-        return [];
-      }
-
-      return raw
-        .split('\n')
-        .filter(Boolean)
-        .map((line) => JSON.parse(line) as WorkingNote);
-    });
+    .flatMap((fileName) => readJsonLines<WorkingNote>(join(workingDir, fileName)));
 }
 
 export function archiveWorkingNotes(memoryDir: string, sessionId: string): number {
@@ -510,9 +480,7 @@ export function archiveWorkingNotes(memoryDir: string, sessionId: string): numbe
 
   const prefix = `${sessionId}-agent-`;
   const matchingFiles = readdirSync(workingDir)
-    .filter(
-    (fileName) => fileName.startsWith(prefix) && fileName.endsWith('.jsonl'),
-    )
+    .filter((fileName) => fileName.startsWith(prefix) && fileName.endsWith('.jsonl'))
     .sort();
 
   for (const fileName of matchingFiles) {
@@ -566,13 +534,7 @@ export function listSessions(db: Database.Database): Session[] {
        FROM sessions
        ORDER BY started_at DESC`,
     )
-    .all() as Array<{
-    id: string;
-    name: string | null;
-    started_at: string;
-    ended_at: string | null;
-    consolidated_at: string | null;
-  }>;
+    .all() as SessionRow[];
 
   return rows.map(normalizeSessionRow);
 }
@@ -591,6 +553,83 @@ export function getMainEntryFilePath(db: Database.Database, id: number): string 
   }
 
   return row.file_path;
+}
+
+export interface MemoryStats {
+  totalEntries: number;
+  activeEntries: number;
+  supersededEntries: number;
+  byType: Record<string, number>;
+  byConfidence: Record<string, number>;
+  topTags: Array<{ tag: string; count: number }>;
+  totalSessions: number;
+  consolidatedSessions: number;
+  staleEntries: number;
+}
+
+export function getStats(db: Database.Database): MemoryStats {
+  const { total, active } = countMainEntries(db);
+
+  const byTypeRows = db
+    .prepare(`SELECT type, COUNT(*) as count FROM memory_main WHERE superseded_by IS NULL GROUP BY type`)
+    .all() as Array<{ type: string; count: number }>;
+
+  const byConfidenceRows = db
+    .prepare(`SELECT confidence, COUNT(*) as count FROM memory_main WHERE superseded_by IS NULL GROUP BY confidence`)
+    .all() as Array<{ confidence: string; count: number }>;
+
+  const tagRows = db
+    .prepare(`SELECT tags FROM memory_main WHERE superseded_by IS NULL AND tags IS NOT NULL AND tags != ''`)
+    .all() as Array<{ tags: string }>;
+
+  const tagCounts: Record<string, number> = {};
+  for (const { tags } of tagRows) {
+    for (const tag of tags.split(',').map((t) => t.trim()).filter(Boolean)) {
+      tagCounts[tag] = (tagCounts[tag] ?? 0) + 1;
+    }
+  }
+
+  const topTags = Object.entries(tagCounts)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 10)
+    .map(([tag, count]) => ({ tag, count }));
+
+  const sessionRow = db
+    .prepare(`SELECT COUNT(*) as total, COUNT(consolidated_at) as consolidated FROM sessions`)
+    .get() as { total: number; consolidated: number };
+
+  const staleRow = db
+    .prepare(
+      `SELECT COUNT(*) as count FROM memory_main
+       WHERE superseded_by IS NULL AND JULIANDAY('now') - JULIANDAY(last_verified) > 14`,
+    )
+    .get() as { count: number };
+
+  return {
+    totalEntries: total,
+    activeEntries: active,
+    supersededEntries: total - active,
+    byType: Object.fromEntries(byTypeRows.map((r) => [r.type, r.count])),
+    byConfidence: Object.fromEntries(byConfidenceRows.map((r) => [r.confidence, r.count])),
+    topTags,
+    totalSessions: sessionRow.total,
+    consolidatedSessions: sessionRow.consolidated,
+    staleEntries: staleRow.count,
+  };
+}
+
+export function readCorrections(memoryDir: string): Correction[] {
+  return readJsonLines<Correction>(join(memoryDir, 'corrections.jsonl'));
+}
+
+export function countMainEntries(db: Database.Database): { total: number; active: number } {
+  return db
+    .prepare(
+      `SELECT COUNT(*) as total,
+       COUNT(CASE WHEN superseded_by IS NULL THEN 1 END) as active
+       FROM memory_main`,
+    )
+    .get() as { total: number; active: number };
 }
 
 export function appendCorrection(

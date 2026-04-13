@@ -8,6 +8,9 @@ After the takehome ships, this list becomes the roadmap.
 
 - **Replicas integration** — see README "Production deployment notes" section. The full plan is documented and ready to implement.
 - **Migrate from SQLite to Supabase Postgres** — drop-in replacement for the storage layer, `tsvector` replaces FTS5
+- **Agent startup bootstrap** — when a VM/session starts, inject the memory command into PATH, set `REPLICAS_MEMORY_SESSION_ID` / `REPLICAS_MEMORY_AGENT_ID`, and prepend a short usage block to the agent's startup instructions telling it when to call `search`, `read`, and `note` so models use project memory consistently without manual prompting.
+- **Background consolidation worker** — on VM teardown, enqueue consolidation as an async job (Supabase Edge Function or `pg_cron`) so VM shutdown isn't blocked on the LLM call. Worker polls for sessions with `ended_at` set but `consolidated_at` null.
+- **Postgres advisory lock for consolidation** — before running a consolidation pass, acquire `pg_try_advisory_lock(project_id)` to prevent two simultaneous consolidations for the same project from producing duplicate or conflicting writes. Advisory locks are cooperative (no row/table enforcement) but sufficient since all workers go through the same code path. Release with `pg_advisory_unlock` when done.
 - **Workspace integration** — add this as a package in the existing Replicas monorepo, expose as `replicas memory <subcommand>`
 - **Cursor extension** — surface relevant memory entries inline as completion hints
 

@@ -58,9 +58,20 @@ export interface ConsolidationAction {
 
 export interface SearchResult {
   id: number;
+  type: MemoryType;
   title: string;
   snippet: string;
   file_path: string;
   last_verified: string;
   confidence: Confidence;
+}
+
+export interface Correction {
+  ts: string;
+  session_id?: string;
+  agent_id?: string;
+  context?: string;
+  agent_did: string;
+  user_corrected_to: string;
+  rationale: string;
 }
