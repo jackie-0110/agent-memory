@@ -9,7 +9,6 @@
     "demo": "tsx demo/demo.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.40.0",
     "better-sqlite3": "^11.0.0",
     "chalk": "^5.0.0",
     "commander": "^12.0.0",

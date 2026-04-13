@@ -1,12 +1,21 @@
-# Directories
+# Runtime memory directories
 .memory/
 .memory-*/
+
+# Accidental root-level memory artifacts (if init is run without --memory-dir)
+memory.db
+corrections.jsonl
+main/
+working/
+
+# Dependencies
 node_modules/
 .yarn/
+
+# Environment
 .env
 
-# Files
-.env
+# Tooling
 *.log
 .DS_Store
 .pnp.cjs
